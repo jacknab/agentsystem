@@ -1,0 +1,12 @@
+{
+  "name": "Certxa Agent Terminal",
+  "description": "Real-time call center agent desktop with warm transfers, hold management, and Twilio integration.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "WebSockets",
+    "Twilio Voice",
+    "PostgreSQL"
+  ]
+}
