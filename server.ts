@@ -28,6 +28,7 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname))); // Serve root files (audio, etc)
 
 // Twilio Client
 const twilioClient = twilio(
@@ -63,12 +64,125 @@ app.post("/api/admin/agents", (req, res) => {
   res.json({ success: true });
 });
 
+app.put("/api/admin/agents/:id", (req, res) => {
+  const { id } = req.params;
+  const { name, pin } = req.body;
+  db.updateAgent(id, name, pin);
+  res.json({ success: true });
+});
+
+app.delete("/api/admin/agents/:id", (req, res) => {
+  db.deleteAgent(req.params.id);
+  res.json({ success: true });
+});
+
 app.get("/api/admin/logs", (req, res) => {
   res.json(db.getLogs());
 });
 
 app.get("/api/admin/stats/:agentId", (req, res) => {
   res.json(db.getAgentStats(req.params.agentId));
+});
+
+app.get("/api/admin/scripts", (req, res) => {
+  res.json(db.getScripts());
+});
+
+app.post("/api/admin/scripts", (req, res) => {
+  const { state, read, guide, options } = req.body;
+  if (!state) return res.status(400).json({ error: "Missing state ID" });
+  db.updateScript(state, read, guide, options || []);
+  res.json({ success: true });
+});
+
+// --- IVR & Business Hours ---
+const BUSINESS_HOURS = {
+  start: 9, // 9 AM
+  end: 18,  // 6 PM
+  days: [1, 2, 3, 4, 5] // Mon-Fri
+};
+
+function isBusinessOpen() {
+  const now = new Date();
+  const day = now.getDay();
+  const hour = now.getHours();
+  return BUSINESS_HOURS.days.includes(day) && hour >= BUSINESS_HOURS.start && hour < BUSINESS_HOURS.end;
+}
+
+app.post("/twilio/voice", (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  
+  if (isBusinessOpen()) {
+    // Greeting: English press 1, Vietnamese press 2
+    const gather = twiml.gather({
+      numDigits: 1,
+      action: "/twilio/ivr/selection",
+      timeout: 5
+    });
+    
+    gather.play("/greet1.mp3");
+    
+    // Fallback
+    twiml.say("Welcome. Please press 1 for English or 2 for Vietnamese.");
+    
+    const callSid = req.body.CallSid || `CS${Date.now()}`;
+    db.logAction('SYS', 'INBOUND_START', callSid);
+  } else {
+    // After hours - Route to main voicemail or menu
+    twiml.say("Thank you for calling. We are currently closed.");
+    twiml.say("Please leave a message after the tone or call back during business hours.");
+    twiml.record({
+      action: "/twilio/voicemail/general",
+      maxLength: 30,
+      finishOnKey: "#"
+    });
+  }
+
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/twilio/ivr/selection", (req, res) => {
+  const { Digits, CallSid } = req.body;
+  const twiml = new twilio.twiml.VoiceResponse();
+  
+  if (Digits === '2') {
+    db.logAction('SYS', 'LANG_VIETNAMESE', CallSid);
+    twiml.play("/anna_vietnamese.mp3");
+    twiml.say({ language: 'vi-VN' }, "Vui lòng chờ trong khi chúng tôi kết nối bạn.");
+  } else {
+    // Default to English (Digits 1 or timeout)
+    db.logAction('SYS', 'LANG_ENGLISH', CallSid);
+    twiml.play("/anna_english.mp3");
+    twiml.say("Please hold while we connect you to an English speaking agent.");
+  }
+  
+  // In a real scenario, we'd proceed to <Dial> or <Queue>
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/twilio/voicemail/:agentId", (req, res) => {
+  const { agentId } = req.params;
+  const { RecordingUrl, From, CallSid } = req.body;
+  
+  if (RecordingUrl) {
+    db.saveVoicemail(agentId === 'general' ? 'SYSTEM' : agentId, CallSid, From, RecordingUrl);
+    db.logAction(agentId, 'VOICEMAIL_RECEIVED', CallSid);
+  }
+  
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.say("Thank you for your message. Goodbye.");
+  twiml.hangup();
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.get("/api/voicemails", (req, res) => {
+  const agentId = req.query.agentId as string;
+  res.json(db.getVoicemails(agentId));
+});
+
+app.post("/api/voicemails/:id/read", (req, res) => {
+  db.markVoicemailRead(Number(req.params.id));
+  res.json({ success: true });
 });
 
 // --- Silent Join (QA Monitor) ---

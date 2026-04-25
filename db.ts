@@ -51,6 +51,27 @@ export class Database {
       )
     `);
 
+    // Voicemails Table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS voicemails (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agentId TEXT,
+        callSid TEXT,
+        fromNumber TEXT,
+        recordingUrl TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        isRead INTEGER DEFAULT 0
+      )
+    `);
+
+    // Business Hours Table (Optional but good for robustness)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    `);
+
     // Seed admin if not exists
     const admin = this.db.prepare("SELECT * FROM users WHERE id = ?").get("admin-001");
     if (!admin) {
@@ -93,6 +114,10 @@ export class Database {
     return stmt.run(agentId, action, callSid);
   }
 
+  logAction(agentId: string, action: string, callSid: string | null = null) {
+    return this.logAgentAction(agentId, action, callSid);
+  }
+
   getLogs(agentId?: string) {
     if (agentId) {
       return this.db.prepare("SELECT * FROM agent_logs WHERE agentId = ? ORDER BY timestamp DESC").all(agentId);
@@ -103,6 +128,16 @@ export class Database {
   createAgent(id: string, name: string, pin: string) {
     const stmt = this.db.prepare("INSERT INTO users (id, name, role, status, pin) VALUES (?, ?, 'agent', 'available', ?)");
     return stmt.run(id, name, pin);
+  }
+
+  updateAgent(id: string, name: string, pin: string) {
+    const stmt = this.db.prepare("UPDATE users SET name = ?, pin = ? WHERE id = ?");
+    return stmt.run(name, pin, id);
+  }
+
+  deleteAgent(id: string) {
+    const stmt = this.db.prepare("DELETE FROM users WHERE id = ?");
+    return stmt.run(id);
   }
 
   createTransfer(callSid: string, fromAgent: string, toAgent: string) {
@@ -129,5 +164,44 @@ export class Database {
       FROM calls 
       WHERE assignedAgent = ? AND answeredAt IS NOT NULL
     `).get(agentId);
+  }
+
+  getScripts() {
+    const rows = this.db.prepare("SELECT * FROM scripts").all();
+    const map: Record<string, any> = {};
+    rows.forEach((r: any) => {
+      map[r.state] = { 
+        read: r.read, 
+        guide: r.guide,
+        options: JSON.parse(r.options || '[]')
+      };
+    });
+    return map;
+  }
+
+  updateScript(state: string, read: string, guide: string, options: any[] = []) {
+    const stmt = this.db.prepare(`
+      INSERT INTO scripts (state, read, guide, options)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(state) DO UPDATE SET read = excluded.read, guide = excluded.guide, options = excluded.options
+    `);
+    const optionsStr = JSON.stringify(options);
+    return stmt.run(state, read, guide, optionsStr);
+  }
+
+  saveVoicemail(agentId: string, callSid: string, from: string, url: string) {
+    const stmt = this.db.prepare("INSERT INTO voicemails (agentId, callSid, fromNumber, recordingUrl) VALUES (?, ?, ?, ?)");
+    return stmt.run(agentId, callSid, from, url);
+  }
+
+  getVoicemails(agentId?: string) {
+    if (agentId) {
+      return this.db.prepare("SELECT * FROM voicemails WHERE agentId = ? ORDER BY timestamp DESC").all(agentId);
+    }
+    return this.db.prepare("SELECT * FROM voicemails ORDER BY timestamp DESC").all();
+  }
+
+  markVoicemailRead(id: number) {
+    return this.db.prepare("UPDATE voicemails SET isRead = 1 WHERE id = ?").run(id);
   }
 }

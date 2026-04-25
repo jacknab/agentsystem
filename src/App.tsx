@@ -39,7 +39,7 @@ const SCRIPTS = {
     guide: 'Customer is in queue. Press accept or type ACCEPT to take the call.'
   },
   ACTIVE: {
-    read: 'Thank you for confirming, <strong>[CUSTOMER NAME]</strong>. How can I help you today?',
+    read: 'Thank you for confirming. How can I help you today?',
     guide: 'Account is verified. Listen to issue, then press B for Billing queries, T for Tech support, G for General, or 1/2/3 for common options on the right.'
   },
   HOLD: {
@@ -136,22 +136,32 @@ export default function App() {
   const [mode, setMode] = useState<'AGENT' | 'ADMIN' | 'MONITOR'>('AGENT');
   const [agents, setAgents] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  const [voicemails, setVoicemails] = useState<any[]>([]);
+  const [dbScripts, setDbScripts] = useState<Record<string, { read: string; guide: string }>>({});
+  const [editingScript, setEditingScript] = useState<string | null>(null);
+  const [editingAgent, setEditingAgent] = useState<any | null>(null);
+  const [editForm, setEditForm] = useState<{ read: string; guide: string; options: { key: string; label: string }[] }>({ read: '', guide: '', options: [] });
+  const [agentForm, setAgentForm] = useState({ name: '', pin: '' });
   const [activeCallSid, setActiveCallSid] = useState<string | null>(null);
   const [cmd, setCmd] = useState('');
   const [menuMode, setMenuMode] = useState<'MAIN' | 'PHONE'>('MAIN');
 
   const fetchAdminData = useCallback(async () => {
     try {
-      const [agentsRes, logsRes] = await Promise.all([
+      const [agentsRes, logsRes, scriptsRes, vmRes] = await Promise.all([
         fetch("/api/admin/agents"),
-        fetch("/api/admin/logs")
+        fetch("/api/admin/logs"),
+        fetch("/api/admin/scripts"),
+        fetch(mode === 'ADMIN' ? "/api/voicemails" : `/api/voicemails?agentId=${AGENT_ID}`)
       ]);
       setAgents(await agentsRes.json());
       setLogs(await logsRes.json());
+      setVoicemails(await vmRes.json());
+      if (scriptsRes.ok) setDbScripts(await scriptsRes.json());
     } catch (err) {
       console.error(err);
     }
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     if (mode === 'ADMIN') fetchAdminData();
@@ -160,6 +170,8 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const activeCall = calls.find(c => c.callSid === activeCallSid) || calls.find(c => c.assignedAgent === AGENT_ID);
+  const inboundCall = calls.find(c => c.status === 'INBOUND' || c.status === 'QUEUED');
+  const queuedCount = calls.filter(c => c.status === 'INBOUND' || c.status === 'QUEUED').length;
 
   const showNotify = useCallback((msg: string, type = 'info') => {
     setNotify({ msg, type, id: Date.now() });
@@ -299,6 +311,7 @@ export default function App() {
 
     if (mode === 'ADMIN') {
       if (input.startsWith("CREATE ")) {
+        // ... (existing code omitted for brevity but I'll keep it)
         const parts = input.split(" ");
         if (parts.length >= 4) {
           const id = parts[1];
@@ -313,6 +326,16 @@ export default function App() {
             fetchAdminData();
           });
         }
+      } else if (input === "SAVE" && editingScript) {
+        fetch("/api/admin/scripts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: editingScript, ...editForm })
+        }).then(() => {
+          showNotify(`SCRIPT ${editingScript} UPDATED`, 'ok');
+          setEditingScript(null);
+          fetchAdminData();
+        });
       }
       setCmd('');
       return;
@@ -353,15 +376,25 @@ export default function App() {
         triggerWebhook('answer');
       } else if (input === "W" || input === "WRAP") {
         triggerWebhook('wrap');
+        // W key now clears data as requested
+        setCalls([]); 
+        setActiveCallSid(null);
+        showNotify('CALL WRAPPED: Screen cleared', 'success');
       } else if (input === "T" || input === "TAKEOVER") {
         const briefingCall = calls.find(c => c.status === "BRIEFING" && c.toAgent === AGENT_ID);
         if (briefingCall) {
           fetch("/twilio/transfer/complete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid: briefingCall.callSid, toAgent: AGENT_ID }) });
         }
       } else if (input === "ESC" || input === "ESCAPE") {
+        // ESC is now "safe" - only resets the menu, doesn't clear call data
         setMenuMode('MAIN');
+        showNotify('NAV_RESET', 'info');
+      } else if (input === "RESET" || input === "CLEAR") {
+        // Manual full wipe command
+        setCalls([]);
         setActiveCallSid(null);
-        showNotify('Reset to default view', 'info');
+        setMenuMode('MAIN');
+        showNotify('SYSTEM_WIPE: Buffers purged', 'warn');
       } else {
         showNotify(`Unknown command: ${input}`, 'err');
       }
@@ -377,8 +410,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const refocus = () => {
+      // Small delay prevents focus-stealing from preventing legitimate interactions
+      setTimeout(() => {
+        if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'BUTTON') {
+          inputRef.current?.focus();
+        }
+      }, 50);
+    };
+    window.addEventListener('click', refocus);
+    return () => window.removeEventListener('click', refocus);
+  }, []);
+
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // If we are typing in the input, don't trigger global hotkeys unless it's ESC
+      // 1. If already typing in an input, ONLY handle Escape to blur
       if (e.target instanceof HTMLInputElement) {
         if (e.key === 'Escape') {
           inputRef.current?.blur();
@@ -388,37 +434,49 @@ export default function App() {
       }
       
       const key = e.key.toUpperCase();
-      
-      // Simulation toggle
+
+      // Simulation toggle (Backtick)
       if (e.key === '`') { 
+        e.preventDefault();
         setShowSim(prev => !prev); 
         return; 
       }
-
-      // Global hotkeys
-      if (key === 'A') execCmd('A');
-      if (key === 'H') execCmd('H');
-      if (key === 'P') execCmd('H'); // P for phone/hold is also common
-      if (key === 'R') execCmd('R');
-      if (key === 'X') execCmd('X');
-      if (key === 'T') execCmd('T');
-      if (key === 'W') execCmd('W');
-      if (key === 'B') execCmd('B');
-      if (key === '0') execCmd('00');
-      if (key === 'ESCAPE') execCmd('ESC');
       
+      // 2. Handle Enter to focus the command bar
       if (e.key === 'Enter') {
-        inputRef.current?.focus();
         e.preventDefault();
+        inputRef.current?.focus();
+        return;
+      }
+
+      // 3. Handle specific global hotkeys ONLY when not focused
+      const isHotkey = ['A', 'H', 'P', 'R', 'X', 'T', 'W', 'B', '0'].includes(key) || key === 'ESCAPE';
+      
+      if (isHotkey) {
+        e.preventDefault();
+        if (key === 'A') execCmd('A');
+        if (key === 'H' || key === 'P') execCmd('H');
+        if (key === 'R') execCmd('R');
+        if (key === 'X') execCmd('X');
+        if (key === 'T') execCmd('T');
+        if (key === 'W') execCmd('W');
+        if (key === 'B') execCmd('B');
+        if (key === '0') execCmd('00');
+        if (key === 'ESCAPE') execCmd('ESC');
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // If it's a regular character and we're not using it as a hotkey, 
+        // just focus the input and let the browser naturally type it in.
+        inputRef.current?.focus();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [execCmd, menuMode]);
+  }, [execCmd]);
 
   const callState = activeCall?.status || 'IDLE';
   const sc = STATES[callState as keyof typeof STATES] || STATES.IDLE;
-  const script = SCRIPTS[callState as keyof typeof SCRIPTS] || SCRIPTS.IDLE;
+  const effectiveScripts = { ...SCRIPTS, ...dbScripts };
+  const script = effectiveScripts[callState as keyof typeof effectiveScripts] || effectiveScripts.IDLE;
   
   const phoneOptions = [
     { key: 'H', label: 'Hold Call' },
@@ -428,7 +486,9 @@ export default function App() {
     { key: 'T', label: 'Tech Dept' },
   ];
 
-  const opts = menuMode === 'PHONE' ? phoneOptions : (STATE_OPTIONS[callState as keyof typeof STATE_OPTIONS] || []);
+  const dbOpts = (script as any).options || [];
+  const hardcodedOpts = STATE_OPTIONS[callState as keyof typeof STATE_OPTIONS] || [];
+  const opts = menuMode === 'PHONE' ? phoneOptions : (dbOpts.length > 0 ? dbOpts : hardcodedOpts);
 
   return (
     <div className="terminal font-mono">
@@ -454,43 +514,257 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-right">
-          <span className="agent-tag">{mode}: {AGENT_ID} · HCM-01</span>
+          <div className="queue-counter">
+            <span className="queue-label">QUEUED:</span>
+            <span className={`queue-val ${queuedCount > 0 ? 'ringing' : ''}`}>{queuedCount}</span>
+          </div>
+          <span className="agent-tag">{mode}: {AGENT_ID}</span>
           {new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })} ICT
         </div>
       </div>
 
       <div className="main">
+        {inboundCall && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 pointer-events-none">
+            <div className="bg-white text-black p-8 border-[12px] border-double border-black animate-pulse flex flex-col items-center">
+              <div className="text-sm font-bold tracking-[0.3em] mb-2">SIGNAL_DETECTED</div>
+              
+              {logs.find(l => l.callSid === inboundCall.callSid && l.action.startsWith('LANG_')) && (
+                <div className="bg-blue-600 text-white px-6 py-1 rounded-sm text-xs font-bold mb-4 flex items-center gap-2">
+                  <span className="animate-bounce">🌐</span>
+                  PREF_LANGUAGE: {logs.find(l => l.callSid === inboundCall.callSid && l.action.startsWith('LANG_')).action.replace('LANG_', '')}
+                </div>
+              )}
+
+              <div className="text-6xl font-black mb-4">ACCEPT [A]</div>
+              <div className="text-[10px] opacity-50">PRESS A TO ANSWER SESSION</div>
+            </div>
+          </div>
+        )}
+
         {mode === 'ADMIN' ? (
           <div className="admin-view p-6 bg-black text-white overflow-auto w-full h-full">
-            <h2 className="text-xl font-bold mb-4 text-[#4f8ef7]">AGENT MANAGEMENT SYSTEM</h2>
-            <div className="grid grid-cols-2 gap-6">
-              <div className="panel bg-[#111] border border-[#333] p-4 h-96">
-                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">ACTIVE AGENTS</h3>
-                <div className="overflow-auto h-[300px]">
+            <div className="flex justify-between items-end mb-4 border-b-2 border-[#4f8ef7] pb-2">
+              <h2 className="text-xl font-bold">SYSTEM CONTROL & SCRIPT MANAGER</h2>
+              <div className="text-[10px] text-gray-500 uppercase tracking-widest">PERSISTENCE: FIREBASE_PENDING</div>
+            </div>
+            <div className="grid grid-cols-12 gap-6">
+              {/* Agents Panel */}
+              <div className="col-span-4 panel bg-[#111] border border-[#333] p-4 h-[500px] flex flex-col">
+                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">IDENTITY MANAGEMENT</h3>
+                <div className="overflow-auto flex-1 mb-4">
                   {agents.map(a => (
-                    <div key={a.id} className="flex justify-between py-2 border-b border-[#1a1a1a] text-xs">
-                      <span>{a.name} ({a.id})</span>
-                      <span className="text-[#4f8ef7]">PIN: {a.pin}</span>
+                    <div key={a.id} className="flex justify-between items-center py-2 border-b border-[#1a1a1a] text-xs">
+                      <div className="flex flex-col">
+                        <span className={a.id === AGENT_ID ? 'text-green-500' : 'text-white'}>{a.name} ({a.id})</span>
+                        <span className="text-gray-600 text-[10px]">PIN: {a.pin}</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => {
+                            setEditingAgent(a);
+                            setAgentForm({ name: a.name, pin: a.pin });
+                          }} 
+                          className="text-[#4f8ef7] hover:underline"
+                        >EDIT</button>
+                        <button 
+                          onClick={() => {
+                            if (confirm(`Delete agent ${a.id}?`)) {
+                              fetch(`/api/admin/agents/${a.id}`, { method: 'DELETE' }).then(() => {
+                                showNotify(`AGENT ${a.id} REMOVED`, 'warn');
+                                fetchAdminData();
+                              });
+                            }
+                          }} 
+                          className="text-red-500 hover:underline"
+                        >DEL</button>
+                      </div>
                     </div>
                   ))}
-                  {agents.length === 0 && <div className="text-gray-600 italic py-4">No agents found in database.</div>}
+                  {agents.length === 0 && <div className="text-gray-600 italic py-4">No agents found. Use CREATE [id] [name] [pin]</div>}
                 </div>
-                <div className="mt-4 text-[10px] text-gray-500 bg-[#000] p-2 border border-[#333]">
-                  Command Format: CREATE [id] [name] [pin]
+
+                {editingAgent ? (
+                  <div className="p-3 bg-black border border-[#4f8ef7] mb-2 rounded animate-in fade-in zoom-in-95">
+                    <div className="text-[9px] font-bold text-[#4f8ef7] mb-2 uppercase tracking-widest">EDIT AGENT: {editingAgent.id}</div>
+                    <div className="space-y-2">
+                      <input 
+                        className="w-full bg-[#111] border border-[#333] text-xs p-2 outline-none focus:border-[#4f8ef7]"
+                        value={agentForm.name}
+                        placeholder="Agent Name"
+                        onChange={e => setAgentForm({ ...agentForm, name: e.target.value })}
+                      />
+                      <input 
+                        className="w-full bg-[#111] border border-[#333] text-xs p-2 outline-none focus:border-[#4f8ef7]"
+                        value={agentForm.pin}
+                        placeholder="PIN"
+                        onChange={e => setAgentForm({ ...agentForm, pin: e.target.value })}
+                      />
+                      <div className="flex gap-2 pt-1">
+                        <button 
+                          onClick={() => {
+                            fetch(`/api/admin/agents/${editingAgent.id}`, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify(agentForm)
+                            }).then(() => {
+                              showNotify(`AGENT ${editingAgent.id} UPDATED`, 'ok');
+                              setEditingAgent(null);
+                              fetchAdminData();
+                            });
+                          }}
+                          className="flex-1 bg-[#4f8ef7] text-black text-[10px] font-bold py-1"
+                        >SAVE</button>
+                        <button 
+                          onClick={() => setEditingAgent(null)}
+                          className="flex-1 bg-[#222] text-white text-[10px] py-1"
+                        >CANCEL</button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[9px] text-[#4f8ef7] p-2 bg-black border border-[#222] font-mono leading-relaxed">
+                    CMD: CREATE [ID] [NAME] [PIN]<br />
+                    Ex: CREATE agent-10 Jack 1234
+                  </div>
+                )}
+              </div>
+
+              {/* Script Editor Panel */}
+              <div className="col-span-5 panel bg-[#111] border border-[#333] p-4 h-[500px] flex flex-col">
+                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">FLOW & SCRIPT EDITOR</h3>
+                <div className="flex-1 overflow-auto">
+                  {Object.keys(effectiveScripts).map(state => (
+                    <div 
+                      key={state} 
+                      onClick={() => {
+                        const scriptData = effectiveScripts[state as keyof typeof effectiveScripts];
+                        setEditingScript(state);
+                        setEditForm({
+                          read: scriptData?.read || '',
+                          guide: scriptData?.guide || '',
+                          options: (scriptData as any)?.options || []
+                        });
+                      }}
+                      className={`p-2 mb-2 border cursor-pointer transition-all ${editingScript === state ? 'border-[#4f8ef7] bg-[#001a4a]' : 'border-[#222] hover:border-[#444] bg-black'}`}
+                    >
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-xs font-bold font-mono">{state}</span>
+                        <span className="text-[8px] text-gray-600">DYNAMIC_TAG: [CUSTOMER NAME]</span>
+                      </div>
+                      <div className="text-[10px] truncate text-gray-400">{effectiveScripts[state as keyof typeof effectiveScripts]?.read}</div>
+                    </div>
+                  ))}
+                </div>
+                
+                {editingScript && (
+                  <div className="mt-4 p-3 bg-black border border-[#4f8ef7] rounded animate-in fade-in slide-in-from-bottom-2 overflow-y-auto max-h-[300px]">
+                    <div className="text-[10px] font-bold text-[#4f8ef7] mb-2 uppercase">Editing: {editingScript}</div>
+                    <div className="text-[8px] text-gray-500 mb-1 uppercase font-bold">Read Script</div>
+                    <textarea 
+                      className="w-full bg-[#111] border border-[#333] text-xs p-2 mb-2 h-20 outline-none focus:border-[#4f8ef7]"
+                      placeholder="Customer Read text..."
+                      value={editForm.read}
+                      onChange={e => setEditForm({ ...editForm, read: e.target.value })}
+                    />
+                    <div className="text-[8px] text-gray-500 mb-1 uppercase font-bold">Internal Guide</div>
+                    <textarea 
+                      className="w-full bg-[#111] border border-[#333] text-xs p-2 mb-3 h-16 outline-none focus:border-[#4f8ef7]"
+                      placeholder="Internal Agent Guide..."
+                      value={editForm.guide}
+                      onChange={e => setEditForm({ ...editForm, guide: e.target.value })}
+                    />
+                    
+                    <div className="text-[8px] text-gray-500 mb-1 uppercase font-bold">Flow Buttons (Key:Label)</div>
+                    <div className="space-y-1 mb-4">
+                      {editForm.options.map((opt, idx) => (
+                        <div key={idx} className="flex gap-1">
+                          <input 
+                            className="w-12 bg-[#111] border border-[#333] text-[10px] p-1"
+                            value={opt.key}
+                            onChange={e => {
+                              const newOpts = [...editForm.options];
+                              newOpts[idx].key = e.target.value;
+                              setEditForm({ ...editForm, options: newOpts });
+                            }}
+                          />
+                          <input 
+                            className="flex-1 bg-[#111] border border-[#333] text-[10px] p-1"
+                            value={opt.label}
+                            onChange={e => {
+                              const newOpts = [...editForm.options];
+                              newOpts[idx].label = e.target.value;
+                              setEditForm({ ...editForm, options: newOpts });
+                            }}
+                          />
+                          <button 
+                            onClick={() => {
+                              const newOpts = editForm.options.filter((_, i) => i !== idx);
+                              setEditForm({ ...editForm, options: newOpts });
+                            }}
+                            className="text-red-500 text-[10px] px-1"
+                          >×</button>
+                        </div>
+                      ))}
+                      <button 
+                        onClick={() => setEditForm({ ...editForm, options: [...editForm.options, { key: '', label: '' }] })}
+                        className="text-[9px] text-blue-400 border border-blue-900 border-dashed w-full py-1 hover:bg-blue-900/20"
+                      >
+                        + ADD BUTTON
+                      </button>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button onClick={() => execCmd('SAVE')} className="bg-[#4f8ef7] text-black text-[10px] px-4 py-1 font-bold">SAVE_CHANGES</button>
+                      <button onClick={() => setEditingScript(null)} className="bg-[#222] text-white text-[10px] px-4 py-1">CANCEL</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Enhanced Logs Panel */}
+              <div className="col-span-3 panel bg-[#111] border border-[#333] p-4 h-[500px] flex flex-col">
+                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">VOICEMAIL_INBOX</h3>
+                <div className="flex-1 overflow-auto text-[9px] font-mono space-y-2">
+                  {voicemails.map(vm => (
+                    <div key={vm.id} className={`border-l-2 p-2 ${vm.isRead ? 'border-[#333]' : 'border-[#4f8ef7] bg-[#001a4a]'}`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-[#f0a030]">{vm.fromNumber}</span>
+                        <span className="text-gray-600">{new Date(vm.timestamp).toLocaleDateString()}</span>
+                      </div>
+                      <div className="text-white text-[8px] mb-1">FOR: {vm.agentId}</div>
+                      <div className="flex gap-2">
+                        <a href={vm.recordingUrl} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">PLAY</a>
+                        {!vm.isRead && (
+                          <button 
+                            onClick={() => fetch(`/api/voicemails/${vm.id}/read`, { method: 'POST' }).then(fetchAdminData)}
+                            className="text-gray-500 hover:text-white"
+                          >MARK_READ</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {voicemails.length === 0 && <div className="text-gray-600 italic">No voicemails in system...</div>}
                 </div>
               </div>
-              <div className="panel bg-[#111] border border-[#333] p-4 h-96">
-                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">COMPLIANCE LOGS</h3>
-                <div className="h-[300px] overflow-auto text-[10px] space-y-1">
+
+              {/* Telemetry Panel */}
+              <div className="col-span-12 panel bg-[#111] border border-[#333] p-4 h-[200px] flex flex-col mt-4">
+                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">TELEMETRY & SYSTEM LOGS</h3>
+                <div className="flex-1 overflow-auto text-[9px] font-mono space-y-2">
                   {logs.map(l => (
-                    <div key={l.id} className="border-b border-[#1a1a1a] pb-1">
-                      <span className="text-gray-500">[{new Date(l.timestamp).toLocaleTimeString()}]</span>
-                      <span className="text-[#f0a030] ml-2 font-bold">{l.agentId}</span>
-                      <span className="ml-2">{l.action}</span>
-                      {l.callSid && <span className="text-gray-600 ml-2">({l.callSid})</span>}
+                    <div key={l.id} className="border-l-2 border-[#333] pl-2 pb-1 hover:border-[#4f8ef7] transition-colors">
+                      <div className="flex justify-between text-gray-500">
+                        <span>{new Date(l.timestamp).toLocaleTimeString()}</span>
+                        {l.status === 'MISSED' && <span className="text-red-500 font-bold">MISSED</span>}
+                      </div>
+                      <div className="text-white">
+                        <span className="text-[#f0a030]">{l.agentId || 'SYS'}</span>: {l.action}
+                      </div>
+                      {l.callSid && <div className="text-gray-600 truncate">{l.callSid}</div>}
                     </div>
                   ))}
-                  {logs.length === 0 && <div className="text-gray-600 italic">Listening for agent events...</div>}
+                  {logs.length === 0 && <div className="text-gray-600 italic">Listening for system events...</div>}
                 </div>
               </div>
             </div>
@@ -674,6 +948,28 @@ export default function App() {
               ))}
             </div>
           </div>
+          
+          {voicemails.length > 0 && (
+            <div className="p-3 border-t border-[#333] bg-[#050505] overflow-y-auto max-h-[150px]">
+              <div className="text-[8px] font-bold text-[#4f8ef7] mb-2 tracking-widest uppercase">My Voicemails</div>
+              <div className="space-y-2">
+                {voicemails.map(vm => (
+                  <div key={vm.id} className={`p-1 border-b border-[#222] ${vm.isRead ? 'opacity-50' : ''}`}>
+                    <div className="flex justify-between text-[8px]">
+                      <span className="text-orange-400">{vm.fromNumber}</span>
+                      <span className="text-gray-600">{new Date(vm.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                    </div>
+                    <div className="flex gap-2 text-[8px] mt-1">
+                      <a href={vm.recordingUrl} target="_blank" rel="noreferrer" className="text-blue-400">PLAY</a>
+                      {!vm.isRead && (
+                        <button onClick={() => fetch(`/api/voicemails/${vm.id}/read`, { method: 'POST' }).then(fetchAdminData)} className="text-gray-500">READ</button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
         </div>
       )}
@@ -704,7 +1000,10 @@ export default function App() {
             onChange={e => setCmd(e.target.value)}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
-            onKeyDown={e => { if (e.key === 'Enter') execCmd(cmd); if (e.key === 'Escape') execCmd('ESC'); }}
+            onKeyDown={e => { 
+              if (e.key === 'Enter') { e.preventDefault(); execCmd(cmd); } 
+              if (e.key === 'Escape') { e.preventDefault(); execCmd('ESC'); } 
+            }}
             placeholder=""
             autoComplete="off"
             spellCheck={false}

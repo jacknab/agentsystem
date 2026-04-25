@@ -6,7 +6,7 @@
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
-@@layer base {
+@layer base {
   body {
     @apply font-sans bg-[#000] text-white m-0 p-0;
   }
@@ -103,11 +103,39 @@
 .topbar-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 10px;
   color: #666;
   letter-spacing: 0.06em;
+}
+
+.queue-counter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #0a0a0a;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  border: 1px solid #222;
+}
+
+.queue-label {
+  color: #555;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.queue-val {
+  color: #888;
+  font-weight: 600;
+}
+
+.queue-val.ringing {
+  color: #f0a030;
+  text-shadow: 0 0 8px rgba(240, 160, 48, 0.4);
 }
 
 .agent-tag {

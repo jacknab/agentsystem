@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "Script": {
+      "title": "Call Script",
+      "description": "Dynamic text and guidance for a specific call state",
+      "type": "object",
+      "properties": {
+        "read": { "type": "string", "description": "Text the agent should read aloud" },
+        "guide": { "type": "string", "description": "Internal guidance instructions" }
+      },
+      "required": ["read", "guide"]
+    },
+    "CallLog": {
+      "title": "Call Log",
+      "description": "Historical record of a call event",
+      "type": "object",
+      "properties": {
+        "callSid": { "type": "string" },
+        "agentId": { "type": "string" },
+        "action": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "status": { "type": "string" }
+      },
+      "required": ["timestamp", "action"]
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "System user with access to the terminal",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "pin": { "type": "string" },
+        "role": { "type": "string", "enum": ["AGENT", "ADMIN", "MONITOR"] }
+      },
+      "required": ["id", "name", "role"]
+    }
+  },
+  "firestore": {
+    "/scripts/{stateId}": {
+      "schema": "Script",
+      "description": "Collection of call scripts keyed by state ID"
+    },
+    "/call_logs/{logId}": {
+      "schema": "CallLog",
+      "description": "History of all call-related events"
+    },
+    "/agents/{agentId}": {
+      "schema": "Agent",
+      "description": "Registered agents in the system"
+    }
+  }
+}
