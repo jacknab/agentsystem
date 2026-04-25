@@ -136,7 +136,6 @@ export default function App() {
   const [mode, setMode] = useState<'AGENT' | 'ADMIN' | 'MONITOR'>('AGENT');
   const [agents, setAgents] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
-  const [voicemails, setVoicemails] = useState<any[]>([]);
   const [dbScripts, setDbScripts] = useState<Record<string, { read: string; guide: string }>>({});
   const [editingScript, setEditingScript] = useState<string | null>(null);
   const [editingAgent, setEditingAgent] = useState<any | null>(null);
@@ -148,20 +147,20 @@ export default function App() {
 
   const fetchAdminData = useCallback(async () => {
     try {
-      const [agentsRes, logsRes, scriptsRes, vmRes] = await Promise.all([
+      const [agentsRes, logsRes] = await Promise.all([
         fetch("/api/admin/agents"),
-        fetch("/api/admin/logs"),
-        fetch("/api/admin/scripts"),
-        fetch(mode === 'ADMIN' ? "/api/voicemails" : `/api/voicemails?agentId=${AGENT_ID}`)
+        fetch("/api/admin/logs")
       ]);
       setAgents(await agentsRes.json());
       setLogs(await logsRes.json());
-      setVoicemails(await vmRes.json());
+      
+      // Also fetch scripts for building the flow editor
+      const scriptsRes = await fetch("/api/admin/scripts");
       if (scriptsRes.ok) setDbScripts(await scriptsRes.json());
     } catch (err) {
       console.error(err);
     }
-  }, [mode]);
+  }, []);
 
   useEffect(() => {
     if (mode === 'ADMIN') fetchAdminData();
@@ -716,33 +715,7 @@ export default function App() {
 
               {/* Enhanced Logs Panel */}
               <div className="col-span-3 panel bg-[#111] border border-[#333] p-4 h-[500px] flex flex-col">
-                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">VOICEMAIL_INBOX</h3>
-                <div className="flex-1 overflow-auto text-[9px] font-mono space-y-2">
-                  {voicemails.map(vm => (
-                    <div key={vm.id} className={`border-l-2 p-2 ${vm.isRead ? 'border-[#333]' : 'border-[#4f8ef7] bg-[#001a4a]'}`}>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-[#f0a030]">{vm.fromNumber}</span>
-                        <span className="text-gray-600">{new Date(vm.timestamp).toLocaleDateString()}</span>
-                      </div>
-                      <div className="text-white text-[8px] mb-1">FOR: {vm.agentId}</div>
-                      <div className="flex gap-2">
-                        <a href={vm.recordingUrl} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">PLAY</a>
-                        {!vm.isRead && (
-                          <button 
-                            onClick={() => fetch(`/api/voicemails/${vm.id}/read`, { method: 'POST' }).then(fetchAdminData)}
-                            className="text-gray-500 hover:text-white"
-                          >MARK_READ</button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                  {voicemails.length === 0 && <div className="text-gray-600 italic">No voicemails in system...</div>}
-                </div>
-              </div>
-
-              {/* Telemetry Panel */}
-              <div className="col-span-12 panel bg-[#111] border border-[#333] p-4 h-[200px] flex flex-col mt-4">
-                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">TELEMETRY & SYSTEM LOGS</h3>
+                <h3 className="text-sm font-bold mb-3 border-b border-[#222] pb-2 text-[#888]">TELEMETRY & LOGS</h3>
                 <div className="flex-1 overflow-auto text-[9px] font-mono space-y-2">
                   {logs.map(l => (
                     <div key={l.id} className="border-l-2 border-[#333] pl-2 pb-1 hover:border-[#4f8ef7] transition-colors">
@@ -940,28 +913,6 @@ export default function App() {
               ))}
             </div>
           </div>
-          
-          {voicemails.length > 0 && (
-            <div className="p-3 border-t border-[#333] bg-[#050505] overflow-y-auto max-h-[150px]">
-              <div className="text-[8px] font-bold text-[#4f8ef7] mb-2 tracking-widest uppercase">My Voicemails</div>
-              <div className="space-y-2">
-                {voicemails.map(vm => (
-                  <div key={vm.id} className={`p-1 border-b border-[#222] ${vm.isRead ? 'opacity-50' : ''}`}>
-                    <div className="flex justify-between text-[8px]">
-                      <span className="text-orange-400">{vm.fromNumber}</span>
-                      <span className="text-gray-600">{new Date(vm.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                    </div>
-                    <div className="flex gap-2 text-[8px] mt-1">
-                      <a href={vm.recordingUrl} target="_blank" rel="noreferrer" className="text-blue-400">PLAY</a>
-                      {!vm.isRead && (
-                        <button onClick={() => fetch(`/api/voicemails/${vm.id}/read`, { method: 'POST' }).then(fetchAdminData)} className="text-gray-500">READ</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
         </div>
       )}

@@ -51,24 +51,13 @@ export class Database {
       )
     `);
 
-    // Voicemails Table
+    // Scripts Table
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS voicemails (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        agentId TEXT,
-        callSid TEXT,
-        fromNumber TEXT,
-        recordingUrl TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        isRead INTEGER DEFAULT 0
-      )
-    `);
-
-    // Business Hours Table (Optional but good for robustness)
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY KEY,
-        value TEXT
+      CREATE TABLE IF NOT EXISTS scripts (
+        state TEXT PRIMARY KEY,
+        read TEXT,
+        guide TEXT,
+        options TEXT DEFAULT '[]'
       )
     `);
 
@@ -112,10 +101,6 @@ export class Database {
   logAgentAction(agentId: string, action: string, callSid: string | null = null) {
     const stmt = this.db.prepare("INSERT INTO agent_logs (agentId, action, callSid) VALUES (?, ?, ?)");
     return stmt.run(agentId, action, callSid);
-  }
-
-  logAction(agentId: string, action: string, callSid: string | null = null) {
-    return this.logAgentAction(agentId, action, callSid);
   }
 
   getLogs(agentId?: string) {
@@ -187,21 +172,5 @@ export class Database {
     `);
     const optionsStr = JSON.stringify(options);
     return stmt.run(state, read, guide, optionsStr);
-  }
-
-  saveVoicemail(agentId: string, callSid: string, from: string, url: string) {
-    const stmt = this.db.prepare("INSERT INTO voicemails (agentId, callSid, fromNumber, recordingUrl) VALUES (?, ?, ?, ?)");
-    return stmt.run(agentId, callSid, from, url);
-  }
-
-  getVoicemails(agentId?: string) {
-    if (agentId) {
-      return this.db.prepare("SELECT * FROM voicemails WHERE agentId = ? ORDER BY timestamp DESC").all(agentId);
-    }
-    return this.db.prepare("SELECT * FROM voicemails ORDER BY timestamp DESC").all();
-  }
-
-  markVoicemailRead(id: number) {
-    return this.db.prepare("UPDATE voicemails SET isRead = 1 WHERE id = ?").run(id);
   }
 }
