@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import twilio from "twilio";
 import dotenv from "dotenv";
+import fs from "fs";
 import { Database } from "./db.js";
 
 dotenv.config();
@@ -472,7 +473,10 @@ app.post("/api/call/end", (req, res) => {
 });
 
 // Vite Middleware
+console.log(`[SYS] Starting server in ${process.env.NODE_ENV || 'development'} mode...`);
+
 if (process.env.NODE_ENV !== "production") {
+  console.log("[VITE] Initializing development middleware...");
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: "spa",
@@ -480,6 +484,16 @@ if (process.env.NODE_ENV !== "production") {
   app.use(vite.middlewares);
 } else {
   const distPath = path.join(process.cwd(), "dist");
+  console.log(`[PROD] Serving static files from: ${distPath}`);
+  
+  // Check if build exists
+  if (!fs.existsSync(path.join(distPath, 'index.html'))) {
+    console.warn("****************************************************************");
+    console.warn("WARNING: 'dist/index.html' not found!");
+    console.warn("Please run 'npm run build' before starting in production mode.");
+    console.warn("****************************************************************");
+  }
+
   app.use(express.static(distPath));
   app.get("*", (req, res) => {
     res.sendFile(path.join(distPath, "index.html"));
