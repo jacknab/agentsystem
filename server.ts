@@ -28,7 +28,6 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname))); // Serve root files (audio, etc)
 
 // Twilio Client
 const twilioClient = twilio(
@@ -120,7 +119,7 @@ app.post("/twilio/voice", (req, res) => {
       timeout: 5
     });
     
-    gather.play("/greet1.mp3");
+    gather.play("https://dogeblast.win/greet1.mp3");
     
     // Fallback
     twiml.say("Welcome. Please press 1 for English or 2 for Vietnamese.");
@@ -147,12 +146,12 @@ app.post("/twilio/ivr/selection", (req, res) => {
   
   if (Digits === '2') {
     db.logAction('SYS', 'LANG_VIETNAMESE', CallSid);
-    twiml.play("/anna_vietnamese.mp3");
+    twiml.play("https://dogeblast.win/anna_vietnamese.mp3");
     twiml.say({ language: 'vi-VN' }, "Vui lòng chờ trong khi chúng tôi kết nối bạn.");
   } else {
     // Default to English (Digits 1 or timeout)
     db.logAction('SYS', 'LANG_ENGLISH', CallSid);
-    twiml.play("/anna_english.mp3");
+    twiml.play("https://dogeblast.win/anna_english.mp3");
     twiml.say("Please hold while we connect you to an English speaking agent.");
   }
   
