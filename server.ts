@@ -28,6 +28,7 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname))); // Serve root files (audio, etc)
 
 // Twilio Client
 const twilioClient = twilio(
@@ -112,18 +113,17 @@ app.post("/twilio/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   
   if (isBusinessOpen()) {
-    // Greeting with language selection
+    // Greeting with language selection using the uploaded audio
     const gather = twiml.gather({
       numDigits: 1,
       action: "/twilio/ivr/selection",
       timeout: 5
     });
     
-    // TODO: When user uploads file, change this to twiml.play("/filename.mp3")
-    gather.say({ language: 'vi-VN' }, "Chào mừng bạn. Để nghe bằng tiếng Việt, vui lòng nhấn phím 1.");
+    gather.play("/anna.mp3");
     
-    // English voice follows if no input
-    twiml.say("Welcome. Please hold on the line for the next available agent.");
+    // Fallback if no digits pressed or file missing/ends
+    twiml.say("Connecting you to the next available agent.");
     
     const callSid = req.body.CallSid || `CS${Date.now()}`;
     db.logAction('SYS', 'INBOUND_CALL_QUEUED', callSid);
