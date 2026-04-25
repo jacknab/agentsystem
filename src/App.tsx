@@ -528,14 +528,6 @@ export default function App() {
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 pointer-events-none">
             <div className="bg-white text-black p-8 border-[12px] border-double border-black animate-pulse flex flex-col items-center">
               <div className="text-sm font-bold tracking-[0.3em] mb-2">SIGNAL_DETECTED</div>
-              
-              {logs.find(l => l.callSid === inboundCall.callSid && l.action.startsWith('LANG_')) && (
-                <div className="bg-blue-600 text-white px-6 py-1 rounded-sm text-xs font-bold mb-4 flex items-center gap-2">
-                  <span className="animate-bounce">🌐</span>
-                  PREF_LANGUAGE: {logs.find(l => l.callSid === inboundCall.callSid && l.action.startsWith('LANG_')).action.replace('LANG_', '')}
-                </div>
-              )}
-
               <div className="text-6xl font-black mb-4">ACCEPT [A]</div>
               <div className="text-[10px] opacity-50">PRESS A TO ANSWER SESSION</div>
             </div>

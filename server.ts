@@ -7,7 +7,6 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import twilio from "twilio";
 import dotenv from "dotenv";
-import fs from "fs";
 import { Database } from "./db.js";
 
 dotenv.config();
@@ -113,20 +112,21 @@ app.post("/twilio/voice", (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
   
   if (isBusinessOpen()) {
-    // Greeting: English press 1, Vietnamese press 2
+    // Greeting with language selection
     const gather = twiml.gather({
       numDigits: 1,
       action: "/twilio/ivr/selection",
       timeout: 5
     });
     
-    gather.play("https://dogeblast.win/greet1.mp3");
+    // TODO: When user uploads file, change this to twiml.play("/filename.mp3")
+    gather.say({ language: 'vi-VN' }, "Chào mừng bạn. Để nghe bằng tiếng Việt, vui lòng nhấn phím 1.");
     
-    // Fallback
-    twiml.say("Welcome. Please press 1 for English or 2 for Vietnamese.");
+    // English voice follows if no input
+    twiml.say("Welcome. Please hold on the line for the next available agent.");
     
     const callSid = req.body.CallSid || `CS${Date.now()}`;
-    db.logAction('SYS', 'INBOUND_START', callSid);
+    db.logAction('SYS', 'INBOUND_CALL_QUEUED', callSid);
   } else {
     // After hours - Route to main voicemail or menu
     twiml.say("Thank you for calling. We are currently closed.");
@@ -145,15 +145,12 @@ app.post("/twilio/ivr/selection", (req, res) => {
   const { Digits, CallSid } = req.body;
   const twiml = new twilio.twiml.VoiceResponse();
   
-  if (Digits === '2') {
-    db.logAction('SYS', 'LANG_VIETNAMESE', CallSid);
-    twiml.play("https://dogeblast.win/anna_vietnamese.mp3");
-    twiml.say({ language: 'vi-VN' }, "Vui lòng chờ trong khi chúng tôi kết nối bạn.");
+  if (Digits === '1') {
+    db.logAction('SYS', 'IVR_PREF_VIETNAMESE', CallSid);
+    twiml.say({ language: 'vi-VN' }, "Đang kết nối bạn với nhân viên hỗ trợ tiếng Việt. Vui lòng chờ trong giây lát.");
   } else {
-    // Default to English (Digits 1 or timeout)
-    db.logAction('SYS', 'LANG_ENGLISH', CallSid);
-    twiml.play("https://dogeblast.win/anna_english.mp3");
-    twiml.say("Please hold while we connect you to an English speaking agent.");
+    db.logAction('SYS', 'IVR_PREF_ENGLISH', CallSid);
+    twiml.say("Connecting you to the next available agent. Thank you for waiting.");
   }
   
   // In a real scenario, we'd proceed to <Dial> or <Queue>
@@ -473,10 +470,7 @@ app.post("/api/call/end", (req, res) => {
 });
 
 // Vite Middleware
-console.log(`[SYS] Starting server in ${process.env.NODE_ENV || 'development'} mode...`);
-
 if (process.env.NODE_ENV !== "production") {
-  console.log("[VITE] Initializing development middleware...");
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: "spa",
@@ -484,16 +478,6 @@ if (process.env.NODE_ENV !== "production") {
   app.use(vite.middlewares);
 } else {
   const distPath = path.join(process.cwd(), "dist");
-  console.log(`[PROD] Serving static files from: ${distPath}`);
-  
-  // Check if build exists
-  if (!fs.existsSync(path.join(distPath, 'index.html'))) {
-    console.warn("****************************************************************");
-    console.warn("WARNING: 'dist/index.html' not found!");
-    console.warn("Please run 'npm run build' before starting in production mode.");
-    console.warn("****************************************************************");
-  }
-
   app.use(express.static(distPath));
   app.get("*", (req, res) => {
     res.sendFile(path.join(distPath, "index.html"));
