@@ -693,7 +693,6 @@ export default function App() {
       const number = input.substring(1).replace(/\D/g, "");
       if (number.length === 10) {
         showNotify(`INITIATING: +1${number}`, "info");
-        setLinkStatus('BRIDGING');
         fetch("/api/call/dial", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -701,7 +700,6 @@ export default function App() {
         }).then(async (res) => {
           if (res.ok) {
             setMenuMode("PHONE");
-            setLinkStatus('ACTIVE');
           } else {
             let errorMsg = "Server error";
             try {
@@ -710,12 +708,10 @@ export default function App() {
             } catch (e) {
               console.error("Failed to parse dial error response", e);
             }
-            setLinkStatus('OK');
             showNotify(`DIAL FAILED: ${errorMsg}`, "err");
             console.error("[OUTBOUND] Dial failed:", errorMsg);
           }
         }).catch(err => {
-          setLinkStatus('OK');
           showNotify("NETWORK ERROR: Check server logs", "err");
         });
       } else {
@@ -932,8 +928,8 @@ export default function App() {
       <div className="topbar">
         <div className="topbar-logo">CERTXA <span> {mode}</span> TERMINAL v2.1</div>
         <div className="topbar-center">
-          <div className={`call-pill ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}>
-            <div className={`dot ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}></div>
+          <div className={`call-pill ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING', 'WRAP'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}>
+            <div className={`dot ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING', 'WRAP'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}></div>
             {sc.label}
           </div>
         </div>
@@ -950,7 +946,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3 px-3 border-x border-[#333]">
             <div className={`h-1.5 w-1.5 rounded-full ${
-              linkStatus === 'OK' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 
+              (linkStatus === 'OK' || linkStatus === 'ACTIVE' || (linkStatus as string) === 'BRIDGING') ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 
               linkStatus === 'ERROR' ? 'bg-red-500' : 
               linkStatus === 'CONNECTING' ? 'bg-yellow-500 animate-pulse' : 
               'bg-gray-400'
@@ -962,7 +958,7 @@ export default function App() {
                 window.location.reload(); 
               }}
               className={`text-[9px] font-bold hover:underline ${
-                linkStatus === 'OK' ? 'text-green-500' : 
+                (linkStatus === 'OK' || linkStatus === 'ACTIVE' || (linkStatus as string) === 'BRIDGING') ? 'text-green-500' : 
                 linkStatus === 'ERROR' ? 'text-red-500' : 
                 linkStatus === 'CONNECTING' ? 'text-yellow-500' : 
                 'text-gray-400'

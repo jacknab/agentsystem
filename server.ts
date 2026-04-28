@@ -11,6 +11,13 @@ import { Database } from "./db.js";
 
 dotenv.config();
 
+// Sanitize HOLD_MUSIC_URL to avoid broken twimlets
+let HOLD_MUSIC_URL = process.env.HOLD_MUSIC_URL || "http://com.twilio.music.classical.s3.amazonaws.com/";
+if (HOLD_MUSIC_URL.includes("twimlets.com/holdmusic")) {
+  console.log("[TWILIO] HOLD_MUSIC_URL is using unstable twimlets. Falling back to S3.");
+  HOLD_MUSIC_URL = "http://com.twilio.music.classical.s3.amazonaws.com/";
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -287,7 +294,7 @@ app.post("/twilio/outbound-join", (req, res) => {
     endConferenceOnExit: true,
     statusCallbackEvent: ["start", "end", "join", "leave"],
     statusCallback: statusCallback,
-    waitUrl: 'http://twimlets.com/holdmusic?Queue=standard'
+    waitUrl: HOLD_MUSIC_URL
   }, confName as string);
   res.type('text/xml');
   res.send(twiml.toString());
@@ -603,7 +610,7 @@ app.post("/twilio/inbound", (req, res) => {
     // They will hear hold music until an agent joins with startConferenceOnEnter=true.
     const dial = twiml.dial();
     dial.conference({
-      waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
+      waitUrl: HOLD_MUSIC_URL,
       statusCallbackEvent: ["start", "end", "join", "leave"],
       statusCallback: statusCallback,
       startConferenceOnEnter: false, // Wait for agent
@@ -781,8 +788,8 @@ app.post("/twilio/hold", async (req, res) => {
       // For real hold, we might move them to a different conference or use 'hold' attribute if supported
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
-        .update({ hold: true, holdUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" });
-
+        .update({ hold: true, holdUrl: HOLD_MUSIC_URL });
+      
       call.status = "HOLD";
       call.holdStartTime = Date.now();
       db.updateCallStatus(callSid, "HOLD");
@@ -835,7 +842,7 @@ app.post("/twilio/transfer/initiate", async (req, res) => {
       // 1. Put customer on HOLD
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
-        .update({ hold: true, holdUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" });
+        .update({ hold: true, holdUrl: HOLD_MUSIC_URL });
 
       // 2. Bring Agent B into BRIEFING (simulated via WebSockets / Browser SIP)
       call.status = "BRIEFING";
