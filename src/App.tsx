@@ -239,11 +239,18 @@ export default function App() {
           if (error.code === 31000) userMsg = 'VOIP ERROR: Identity taken or connection failed';
           if (error.code === 31005) userMsg = 'VOIP ERROR: Connection to Twilio timed out';
           if (error.code === 31201) userMsg = 'VOIP ERROR: Invalid token credentials';
-          if (error.code === 31202) userMsg = 'CRITICAL: JWT Signature Validation Failed. Verify Twilio API Secret.';
+          if (error.code === 31202) {
+            userMsg = 'CRITICAL: JWT Signature Validation Failed. Verify Twilio API Secret.';
+            showNotify('SECURITY ERROR: JWT Signature Validation Failed. Check Secret Key.', 'error');
+          }
           if (error.code === 31208) userMsg = 'VOIP ERROR: Token expired';
-          if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling connection failed. Check if an Adblocker or Firewall is blocking Twilio WebSocket connections.';
+          if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling connection failed (check Secret/Firewall)';
           
-          showNotify(userMsg, 'warn');
+          if (error.code === 31202) {
+            showNotify(userMsg, 'error');
+          } else {
+            showNotify(userMsg, 'warn');
+          }
         });
 
         newDevice.on('incoming', (call) => {
@@ -619,8 +626,13 @@ export default function App() {
       } else if (input === "X" || input === "TRANSFER") {
         if (activeCallSid) fetch("/twilio/transfer/initiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid: activeCallSid, fromAgent: AGENT_ID, toAgent: "agent-002" }) });
       } else if (input === "Y" || input === "READY") {
-        setAgentStatus('available');
-        showNotify('AGENT STATUS: READY', 'ok');
+        if (!device || device.state !== 'registered') {
+          showNotify('COMM-LINK ERROR: Check Twilio API Secret (Error 31202)', 'error');
+          console.warn('[VOIP] Cannot set READY - Device state:', device?.state);
+        } else {
+          setAgentStatus('available');
+          showNotify('AGENT STATUS: READY', 'ok');
+        }
       } else if (input === "B" || input === "BILLING") {
         showNotify('Switching to Billing Script', 'warn');
       } else if (input === "T" || input === "TECH") {

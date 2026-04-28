@@ -190,8 +190,9 @@ app.get("/api/auth/token", (req, res) => {
     const appSid = process.env.TWILIO_TWIML_APP_SID?.trim();
 
     // Diagnostic check: Account SID should start with AC, API Keys with SK
-    if (!accountSid.startsWith('AC')) console.warn(`[AUTH] CRITICAL: Account SID "${accountSid.substring(0,4)}..." does not start with AC. This will cause 31202 errors.`);
-    if (!apiKey.startsWith('SK')) console.warn(`[AUTH] Warning: Voice API Key "${apiKey.substring(0,4)}..." does not start with SK. If you are trying to use your Auth Token, please create an API Key in the Twilio Console instead.`);
+    if (!accountSid.startsWith('AC')) console.error(`[AUTH] CRITICAL: TWILIO_ACCOUNT_SID "${accountSid.substring(0,4)}..." is invalid. Must start with AC.`);
+    if (!apiKey.startsWith('SK')) console.error(`[AUTH] CRITICAL: TWILIO_VOICE_API_KEY "${apiKey.substring(0,4)}..." is invalid. Must start with SK. Do NOT use your Auth Token (starts with hex) here.`);
+    if (apiSecret.length < 10) console.error(`[AUTH] CRITICAL: TWILIO_VOICE_API_SECRET seems too short. Verify you copied the full secret from the Twilio Console.`);
 
     const token = new AccessToken(accountSid, apiKey, apiSecret, {
       identity: identity,
