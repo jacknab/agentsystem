@@ -357,10 +357,14 @@ app.post("/twilio/inbound", (req, res) => {
       assignCallToAgent(CallSid, availableAgent.id);
       
       const dial = twiml.dial({
-        timeout: 30,
+        timeout: 20, // Reduced slightly for faster rollover
         callerId: From,
       });
       dial.client(availableAgent.id);
+      
+      // If dial fails or times out, redirect to self to hit the "busy" path
+      twiml.say("Agent did not answer. Re-routing to queue.");
+      twiml.redirect(`${baseUrl}/twilio/inbound`);
     } else {
       twiml.say("All agents are currently busy. Please stay on the line.");
       io.emit("call.queued", state);

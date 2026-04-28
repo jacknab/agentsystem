@@ -196,29 +196,30 @@ export default function App() {
         const newDevice = new Device(token, {
           logLevel: 'debug',
           codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
-          edge: ['ashburn', 'roaming'], // Explicitly set edges to improve discovery
+          // Removing explicit edge to let Twilio auto-discover best path
         });
 
         activeDevice = newDevice;
 
-        // Trigger registration explicitly - REQUIRED in v2.x to receive calls and often helps with signaling errors
+        // Auto-register
         await newDevice.register();
-        console.log('[VOIP] Device registration triggered, current state:', newDevice.state);
 
         newDevice.on('registered', () => {
-          showNotify('VOIP DEVICE REGISTERED', 'ok');
+          showNotify('COMM-LINK ESTABLISHED', 'ok');
           console.log('[VOIP] Device registered successfully');
         });
 
+        newDevice.on('registering', () => {
+          console.log('[VOIP] Registering device...');
+        });
+
         newDevice.on('unregistered', () => {
-          showNotify('VOIP DEVICE UNREGISTERED', 'warn');
-          // Try to re-register after a delay
+          showNotify('COMM-LINK LOST', 'warn');
           setTimeout(() => {
-            if (newDevice.state === 'unregistered') {
-              console.log('[VOIP] Attempting re-registration...');
-              newDevice.register();
+            if (activeDevice && activeDevice.state === 'unregistered') {
+              activeDevice.register().catch(e => console.error('Retry failed', e));
             }
-          }, 5000);
+          }, 3000);
         });
 
         newDevice.on('error', (error) => {
@@ -332,12 +333,12 @@ export default function App() {
         });
       },
       answer: () => {
-        const pendingCall = calls.find(c => c.status === "QUEUED");
-        if (pendingCall) {
+        const myInbound = calls.find(c => (c.status === "INBOUND" || c.status === "QUEUED") && (c.assignedAgent === AGENT_ID || !c.assignedAgent));
+        if (myInbound) {
           fetch("/api/call/assign", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ callSid: pendingCall.callSid, agentId: AGENT_ID })
+            body: JSON.stringify({ callSid: myInbound.callSid, agentId: AGENT_ID })
           });
         }
       },
@@ -371,17 +372,25 @@ export default function App() {
     });
 
     newSocket.on("call.queued", (call: CallState) => {
-      setCalls(prev => prev.map(c => c.callSid === call.callSid ? call : c));
+      setCalls(prev => {
+        const index = prev.findIndex(c => c.callSid === call.callSid);
+        if (index === -1) return [...prev, call];
+        return prev.map(c => c.callSid === call.callSid ? call : c);
+      });
       showNotify(`Call queued in main pool`, 'info');
     });
 
     newSocket.on("call.assigned", (call: CallState) => {
-      setCalls(prev => prev.map(c => c.callSid === call.callSid ? call : c));
+      setCalls(prev => {
+        const index = prev.findIndex(c => c.callSid === call.callSid);
+        if (index === -1) return [...prev, call];
+        return prev.map(c => c.callSid === call.callSid ? call : c);
+      });
       if (call.assignedAgent === AGENT_ID) {
-        setActiveCallSid(call.callSid);
         setIsAccepting(false); 
-        setAgentStatus('busy');
-        showNotify(`Account loaded: ${call.customerName}`, 'ok');
+        // We don't set activeCallSid here anymore to let the Answer popup show
+        // and only set it when the agent accepts the call.
+        showNotify(`SIGNAL RECEIVED: ${call.customerName}`, 'warn');
       }
     });
 
@@ -613,7 +622,8 @@ export default function App() {
         setIsAccepting(true);
         // Immediately move the call out of INBOUND state locally to hide the box instantly
         if (inboundCall) {
-          setCalls(prev => prev.map(c => c.callSid === inboundCall.callSid ? { ...c, status: 'IDLE' } : c));
+          setActiveCallSid(inboundCall.callSid);
+          setCalls(prev => prev.map(c => c.callSid === inboundCall.callSid ? { ...c, status: 'ACTIVE' } : c));
         }
 
         // Accept WebRTC audio if pending
