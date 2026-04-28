@@ -61,6 +61,12 @@ const db = new Database();
 // Types
 interface CallState {
   callSid: string;
+  agentCallSid?: string;
+  customerCallSid?: string;
+  customerNumber?: string;
+  customerDialed?: boolean;
+  baseUrl?: string;
+  conferenceName?: string;
   status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP" | "BRIDGING";
   assignedAgent: string | null;
   customerName: string;
@@ -162,7 +168,6 @@ app.post("/api/call/dial", async (req, res) => {
   if (!number || !agentId) return res.status(400).json({ error: "Missing number or agentId" });
 
   const formattedNumber = number.startsWith('+') ? number : `+1${number.replace(/\D/g, '')}`;
-  const customerCallSid = `out_${Date.now()}`; 
 
   console.log(`[OUTBOUND] Agent ${agentId} is dialing ${formattedNumber}`);
   console.log(`[OUTBOUND] ENV Check - SID: ${!!process.env.TWILIO_ACCOUNT_SID}, Token: ${!!process.env.TWILIO_AUTH_TOKEN}`);
@@ -178,16 +183,6 @@ app.post("/api/call/dial", async (req, res) => {
       console.error("[OUTBOUND] TWILIO_PHONE_NUMBER not set in environment.");
       return res.status(500).json({ error: "Server missing Twilio phone number configuration." });
     }
-
-    // 1. Create a placeholder call state
-    const callState: CallState = {
-      callSid: customerCallSid,
-      status: 'BRIDGING',
-      assignedAgent: agentId,
-      customerName: formattedNumber, // Use number as name for automated display
-      queueName: 'OUTBOUND'
-    };
-    activeCalls.set(customerCallSid, callState);
 
     // 2. Fetch Base URL for TwiML callbacks
     let baseUrl = process.env.APP_URL || "";
@@ -210,41 +205,26 @@ app.post("/api/call/dial", async (req, res) => {
       return res.status(500).json({ error: "Server configuration error: Base URL unknown" });
     }
 
-    console.log(`[OUTBOUND] Agent ${agentId} dialing ${formattedNumber} via ${fromNumber}`);
-    console.log(`[OUTBOUND] TwiML Base URL: ${baseUrl}`);
+    // 3. Create a placeholder call state
+    const callState: CallState = {
+      callSid: "PENDING",
+      status: 'BRIDGING',
+      assignedAgent: agentId,
+      customerName: formattedNumber, 
+      queueName: 'OUTBOUND',
+      customerNumber: formattedNumber,
+      baseUrl: baseUrl
+    };
+
+    console.log(`[OUTBOUND] Agent ${agentId} initiating call to ${formattedNumber} via ${fromNumber}`);
     
-    // Debug: Check if client is using expected Credentials (safely)
-    const activeSid = twilioClient.accountSid;
-    console.log(`[OUTBOUND] Twilio Client using AccountSid: ${activeSid ? activeSid.substring(0, 5) + '...' : 'MISSING'}`);
+    const conferenceName = `outconf_${agentId}_${Date.now()}`;
 
-    // 3. Dial the Customer first, then move them to conference
-    const customerCall = await twilioClient.calls.create({
-      to: formattedNumber,
-      from: fromNumber,
-      url: `${baseUrl}/twilio/outbound-join?confName=conf_${customerCallSid}`
-    }).catch((err: any) => {
-        const msg = err.message || "Unknown error";
-        console.error('[TWILIO] Customer Dial Error:', msg);
-        if (err.status === 401 || msg.includes("Authenticate")) {
-          throw new Error("Twilio Authentication Failed: Check your Account SID and Auth Token.");
-        }
-        if (err.status === 404 || msg.includes("not found")) {
-          throw new Error(`Twilio Error: Phone number ${fromNumber} not found or invalid.`);
-        }
-        throw new Error(`Twilio rejected customer dial: ${msg}`);
-    });
-
-    // Map both the real SID and the placeholder for tracking
-    callState.callSid = customerCall.sid;
-    activeCalls.set(customerCall.sid, callState);
-    // Keep customerCallSid mapping as it's used for the conference FriendlyName
-    activeCalls.set(customerCallSid, callState); 
-
-    // 4. Dial the Agent - Use the same placeholder SID to match the customer's conference
-    await twilioClient.calls.create({
+    // 4. Dial the Agent FIRST
+    const agentCall = await twilioClient.calls.create({
       to: `client:${agentId}`,
       from: fromNumber,
-      url: `${baseUrl}/twilio/agent-join?confName=conf_${customerCallSid}`
+      url: `${baseUrl}/twilio/agent-join?confName=${conferenceName}`
     }).catch((err: any) => {
         const msg = err.message || "Unknown error";
         console.error('[TWILIO] Agent Dial Error:', msg);
@@ -254,7 +234,14 @@ app.post("/api/call/dial", async (req, res) => {
         throw new Error(`Twilio rejected agent dial: ${msg}`);
     });
 
-    res.json({ success: true, callSid: customerCall.sid });
+    // 3. Update call state with Agent's SID and conference details
+    callState.callSid = agentCall.sid;
+    callState.agentCallSid = agentCall.sid;
+    callState.conferenceName = conferenceName;
+    
+    activeCalls.set(agentCall.sid, callState);
+
+    res.json({ success: true, callSid: agentCall.sid });
   } catch (err: any) {
     console.error('[OUTBOUND] Final catch:', err.message);
     res.status(500).json({ error: err.message || "Dial failed" });
@@ -643,6 +630,32 @@ app.post("/twilio/status", (req, res) => {
   if (call) {
     if (StatusCallbackEvent === "participant-join") {
       console.log(`[TWILIO] Participant Join: ${ParticipantSid} in ${FriendlyName} (Call status: ${call.status})`);
+      
+      // OUTBOUND FLOW TRIGGER: When the agent joins their conference, dial the customer
+      if (call.status === "BRIDGING" && call.queueName === "OUTBOUND" && !call.customerDialed) {
+        console.log(`[TWILIO] Agent joined conference. Dialing customer ${call.customerNumber}...`);
+        call.customerDialed = true;
+        
+        const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+        if (fromNumber && call.baseUrl && call.customerNumber && call.conferenceName) {
+           const twilioClient = getTwilioClient();
+           twilioClient.calls.create({
+             to: call.customerNumber,
+             from: fromNumber,
+             url: `${call.baseUrl}/twilio/outbound-join?confName=${call.conferenceName}`
+           }).then((customerCall: any) => {
+             console.log(`[TWILIO] Outbound customer call created: ${customerCall.sid}`);
+             call.customerCallSid = customerCall.sid;
+             // Also track by the new customer SID
+             activeCalls.set(customerCall.sid, call);
+           }).catch((err: any) => {
+             console.error("[TWILIO] Failed to dial customer after agent joined:", err.message);
+             call.status = "WRAP";
+             io.emit("call.ended", { callSid: call.callSid });
+           });
+        }
+      }
+
       // If it's the customer, they are now "QUEUED" in the conference
       if (!call.assignedAgent) {
         call.status = "QUEUED";
@@ -658,8 +671,8 @@ app.post("/twilio/status", (req, res) => {
       }
     } else if (StatusCallbackEvent === "participant-leave") {
       console.log(`[TWILIO] Participant Left: ${ParticipantSid} from ${FriendlyName}`);
-      if (ParticipantSid === call.callSid) {
-        // Customer left
+      if (ParticipantSid === call.callSid || ParticipantSid === call.customerCallSid) {
+        // Customer or Primary party left
         call.status = "WRAP";
         db.updateCallStatus(call.callSid, "WRAP");
         io.emit("call.ended", { callSid: call.callSid });
@@ -765,12 +778,27 @@ app.post("/api/call/bridge", async (req, res) => {
 app.post("/twilio/agent-join", (req, res) => {
   const { confName, muted } = req.query;
   console.log(`[TWILIO] Agent join requested for conference: ${confName} (muted=${muted})`);
+  
+  let baseUrl = process.env.APP_URL || "";
+  if (!baseUrl || baseUrl.includes("-dev-")) {
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
+    const hostStr = Array.isArray(host) ? host[0] : host;
+    if (hostStr && hostStr.includes("-dev-")) {
+      baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
+    } else if (hostStr) {
+      baseUrl = `${protocol}://${hostStr}`;
+    }
+  }
+
   const twiml = new twilio.twiml.VoiceResponse();
   const dial = twiml.dial();
   dial.conference({
-    startConferenceOnEnter: true, // Agent joins and starts music/talking
+    startConferenceOnEnter: true, 
     endConferenceOnExit: true,
-    muted: muted === 'true'
+    muted: muted === 'true',
+    statusCallback: baseUrl ? `${baseUrl}/twilio/status` : undefined,
+    statusCallbackEvent: ["join"]
   }, confName as string);
 
   res.type("text/xml");
