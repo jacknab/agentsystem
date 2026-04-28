@@ -166,23 +166,72 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
+    let activeDevice: Device | null = null;
+
     const initTwilio = async () => {
       try {
         const res = await fetch(`/api/auth/token?identity=${user.id}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({ error: 'Unknown server error' }));
+          showNotify(`TOKEN ERROR: ${errData.error || res.statusText}`, 'err');
+          return;
+        }
         const { token } = await res.json();
         
+        if (!token) {
+          showNotify('ERROR: Received empty token from server', 'err');
+          return;
+        }
+
+        // Check for WebRTC support
+        if (!window.isSecureContext) {
+          showNotify('VOIP ERROR: Insecure context. HTTPS is required.', 'err');
+        }
+        
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          showNotify('VOIP ERROR: Microphone access not supported or blocked.', 'err');
+        }
+
         const newDevice = new Device(token, {
-          logLevel: 1,
+          logLevel: 'debug',
           codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
+          edge: ['ashburn', 'roaming'], // Explicitly set edges to improve discovery
         });
+
+        activeDevice = newDevice;
+
+        // Trigger registration explicitly - REQUIRED in v2.x to receive calls and often helps with signaling errors
+        await newDevice.register();
+        console.log('[VOIP] Device registration triggered, current state:', newDevice.state);
 
         newDevice.on('registered', () => {
           showNotify('VOIP DEVICE REGISTERED', 'ok');
+          console.log('[VOIP] Device registered successfully');
+        });
+
+        newDevice.on('unregistered', () => {
+          showNotify('VOIP DEVICE UNREGISTERED', 'warn');
+          // Try to re-register after a delay
+          setTimeout(() => {
+            if (newDevice.state === 'unregistered') {
+              console.log('[VOIP] Attempting re-registration...');
+              newDevice.register();
+            }
+          }, 5000);
         });
 
         newDevice.on('error', (error) => {
           console.error('Twilio Device Error:', error);
-          showNotify(`VOIP ERROR: ${error.message}`, 'warn');
+          let userMsg = `VOIP ERROR (${error.code}): ${error.message}`;
+          
+          // Map common Twilio error codes to helpful messages
+          if (error.code === 31000) userMsg = 'VOIP ERROR: Identity taken or connection failed';
+          if (error.code === 31005) userMsg = 'VOIP ERROR: Connection to Twilio timed out';
+          if (error.code === 31201) userMsg = 'VOIP ERROR: Invalid token credentials';
+          if (error.code === 31208) userMsg = 'VOIP ERROR: Token expired';
+          if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling connection failed. Check if an Adblocker or Firewall is blocking Twilio WebSocket connections.';
+          
+          showNotify(userMsg, 'warn');
         });
 
         newDevice.on('incoming', (call) => {
@@ -195,18 +244,19 @@ export default function App() {
           });
         });
 
-        await newDevice.register();
         setDevice(newDevice);
       } catch (err) {
         console.error('Twilio Init failed:', err);
+        showNotify(`INIT ERROR: ${err instanceof Error ? err.message : 'Internal failed'}`, 'err');
       }
     };
 
     initTwilio();
+    
     return () => {
-      if (device) {
-        device.destroy();
-        setDevice(null);
+      if (activeDevice) {
+        activeDevice.destroy();
+        activeDevice = null;
       }
     };
   }, [user?.id]);
@@ -981,9 +1031,18 @@ export default function App() {
             <div className="script-pane">
               <div className="pane-label">READ TO CUSTOMER <span className="pane-label-tag">SCRIPT</span></div>
               {script.read ? (
-                <div className="script-read" dangerouslySetInnerHTML={{ __html: script.read.replace("[CUSTOMER NAME]", activeCall?.customerName || "Customer").replace("[AGENT NAME]", AGENT_ID) }} />
+                <div 
+                  className="script-read" 
+                  style={{ height: '19.5px', fontSize: '16px', fontWeight: 'bold', fontFamily: 'Verdana, sans-serif', lineHeight: '17.5px', fontStyle: 'italic' }}
+                  dangerouslySetInnerHTML={{ __html: script.read.replace("[CUSTOMER NAME]", activeCall?.customerName || "Customer").replace("[AGENT NAME]", AGENT_ID) }} 
+                />
               ) : (
-                <div className="script-empty">{callState === 'IDLE' ? 'Waiting for inbound call...' : 'No read script for this state.'}</div>
+                <div 
+                  className="script-empty"
+                  style={{ height: '19.5px', fontSize: '16px', fontWeight: 'bold', fontFamily: 'Verdana, sans-serif', lineHeight: '17.5px', fontStyle: 'italic' }}
+                >
+                  {callState === 'IDLE' ? 'Waiting for inbound call...' : 'No read script for this state.'}
+                </div>
               )}
             </div>
             <div className="script-pane">
@@ -1094,8 +1153,8 @@ export default function App() {
           <div className="options-box">
             <div className="opt-label">OPTIONS</div>
             {opts.length > 0 ? (
-              opts.map((o, i) => (
-                <button className="opt-btn" key={i} onClick={() => execCmd(o.key)}>
+              opts.map((o, idx) => (
+                <button className="opt-btn" key={idx} onClick={() => execCmd(o.key)}>
                   <span className="opt-key">[{o.key}]</span>
                   <span className="opt-text">{o.label}</span>
                 </button>
@@ -1117,8 +1176,8 @@ export default function App() {
           <div className="hotkey-box">
             <div className="hk-label">HOTKEYS</div>
             <div className="hk-grid">
-              {HOTKEYS.map((h, i) => (
-                <div className="hk" key={i}>
+              {HOTKEYS.map((h, idx) => (
+                <div className="hk" key={idx}>
                   <span className="hk-key">{h.key}</span>
                   <span>{h.label}</span>
                 </div>
@@ -1126,8 +1185,8 @@ export default function App() {
             </div>
           </div>
         </div>
-        </div>
-      )}
+      </div>
+    )}
     </div>
 
       {showSim && (

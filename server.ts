@@ -167,28 +167,51 @@ app.get("/twilio/test", (req, res) => {
 // --- Auth ---
 app.get("/api/auth/token", (req, res) => {
   const identity = req.query.identity as string;
-  if (!identity) return res.status(400).send("Identity required");
+  console.log(`[AUTH] Token requested for identity: ${identity}`);
+  
+  if (!identity) {
+    console.error("[AUTH] Identity missing in request");
+    return res.status(400).send("Identity required");
+  }
 
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_VOICE_API_KEY || !process.env.TWILIO_VOICE_API_SECRET) {
+    console.error("[AUTH] Twilio credentials missing in environment variables");
     return res.status(500).json({ error: "Twilio credentials missing on server" });
   }
 
-  const AccessToken = twilio.jwt.AccessToken;
-  const VoiceGrant = AccessToken.VoiceGrant;
+    try {
+    const AccessToken = twilio.jwt.AccessToken;
+    const VoiceGrant = AccessToken.VoiceGrant;
 
-  const token = new AccessToken(
-    process.env.TWILIO_ACCOUNT_SID,
-    process.env.TWILIO_VOICE_API_KEY,
-    process.env.TWILIO_VOICE_API_SECRET,
-    { identity }
-  );
+    const token = new AccessToken(
+      process.env.TWILIO_ACCOUNT_SID!,
+      process.env.TWILIO_VOICE_API_KEY!,
+      process.env.TWILIO_VOICE_API_SECRET!,
+      { 
+        identity: identity,
+        ttl: 3600
+      }
+    );
 
-  const voiceGrant = new VoiceGrant({
-    incomingAllow: true, // Allow incoming calls to browser
-  });
+    // Re-ensure identity
+    token.identity = identity;
 
-  token.addGrant(voiceGrant);
-  res.json({ token: token.toJwt() });
+    const voiceGrant = new VoiceGrant({
+      incomingAllow: true,
+      outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID?.trim(),
+    });
+
+    token.addGrant(voiceGrant);
+    const jwt = token.toJwt();
+    
+    // Detailed logging of the payload to help debug 53000 errors
+    console.log(`[AUTH] Token for ${identity} generated. Grants:`, voiceGrant);
+    
+    res.json({ token: jwt });
+  } catch (err) {
+    console.error("[AUTH] Token generation failed:", err);
+    res.status(500).json({ error: "Failed to generate access token" });
+  }
 });
 
 app.post("/api/auth/login", (req, res) => {
@@ -265,6 +288,29 @@ async function processNextInQueue(agentId: string) {
     assignCallToAgent(nextCall.callSid, agentId);
   }
 }
+
+// --- Browser Outbound ---
+app.post("/twilio/voice", (req, res) => {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const { To, From, callSid } = req.body;
+  
+  console.log(`[VOIP] Browser initiated call: To=${To}, From=${From}`);
+  
+  if (To) {
+    // If we're dialing a number or another client
+    const dial = twiml.dial({ callerId: process.env.TWILIO_PHONE_NUMBER || From });
+    if (To.startsWith('client:')) {
+      dial.client(To.replace('client:', ''));
+    } else {
+      dial.number(To);
+    }
+  } else {
+    twiml.say("Welcome to the Certxa outbound voice service.");
+  }
+  
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
 
 app.post("/twilio/inbound", (req, res) => {
   try {

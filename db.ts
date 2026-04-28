@@ -19,19 +19,23 @@ export class Database {
         email TEXT,
         role TEXT,
         status TEXT,
-        pin TEXT
+        pin TEXT,
+        login_code TEXT UNIQUE
       )
     `);
 
-    // Migration: Add login_code column if it doesn't exist
+    // Migration logic for existing tables
     try {
       const tableInfo = this.db.prepare("PRAGMA table_info(users)").all();
       const hasLoginCode = tableInfo.some((col: any) => col.name === 'login_code');
       if (!hasLoginCode) {
-        this.db.exec("ALTER TABLE users ADD COLUMN login_code TEXT UNIQUE");
+        // SQLite doesn't allow adding a UNIQUE column via ALTER TABLE
+        this.db.exec("ALTER TABLE users ADD COLUMN login_code TEXT");
+        // Create an index if we want uniqueness
+        this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_code ON users(login_code)");
       }
     } catch (err) {
-      console.error("Migration error (users table):", err);
+      console.error("[DATABASE] Critical migration error (users table):", err);
     }
 
     // Calls table
