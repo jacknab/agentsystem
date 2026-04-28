@@ -164,7 +164,7 @@ export default function App() {
   const [isRingingTimedOut, setIsRingingTimedOut] = useState(false);
 
   const [device, setDevice] = useState<Device | null>(null);
-  const [linkStatus, setLinkStatus] = useState<'OFFLINE' | 'OK' | 'ERROR'>('OFFLINE');
+  const [linkStatus, setLinkStatus] = useState<'OFFLINE' | 'CONNECTING' | 'OK' | 'ERROR'>('OFFLINE');
   const [twilioCall, setTwilioCall] = useState<Call | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -175,6 +175,8 @@ export default function App() {
     let activeDevice: Device | null = null;
 
     const initTwilio = async () => {
+      console.log('[VOIP] Starting Twilio initialization...');
+      // showNotify('INITIATING VOIP LINK...', 'info'); // Maybe too noisy, but useful for debug
       try {
         const res = await fetch(`/api/auth/token?identity=${user.id}`);
         if (!res.ok) {
@@ -206,9 +208,7 @@ export default function App() {
 
         activeDevice = newDevice;
 
-        // Auto-register
-        await newDevice.register();
-
+        // Attach listeners BEFORE registering
         newDevice.on('registered', () => {
           showNotify('COMM-LINK ESTABLISHED', 'ok');
           console.log('[VOIP] Device registered successfully');
@@ -217,7 +217,7 @@ export default function App() {
 
         newDevice.on('registering', () => {
           console.log('[VOIP] Registering device...');
-          setLinkStatus('OFFLINE');
+          setLinkStatus('CONNECTING');
         });
 
         newDevice.on('unregistered', () => {
@@ -228,7 +228,7 @@ export default function App() {
             if (activeDevice && activeDevice.state === 'unregistered') {
               console.log('[VOIP] Fetching fresh token for recovery...');
               try {
-                const res = await fetch(`/api/auth/token?identity=${userId}`);
+                const res = await fetch(`/api/auth/token?identity=${user.id}`);
                 const { token } = await res.json();
                 await activeDevice.updateToken(token);
                 await activeDevice.register();
@@ -238,6 +238,9 @@ export default function App() {
             }
           }, 5000);
         });
+
+        // Auto-register
+        await newDevice.register();
 
         newDevice.on('error', (error) => {
           console.error('Twilio Device Error:', error);
@@ -906,8 +909,18 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-3 px-3 border-x border-[#333]">
-            <div className={`h-1.5 w-1.5 rounded-full ${linkStatus === 'OK' ? 'bg-green-500' : linkStatus === 'ERROR' ? 'bg-red-500' : 'bg-yellow-500'}`} />
-            <span className={`text-[9px] font-bold ${linkStatus === 'OK' ? 'text-green-500' : linkStatus === 'ERROR' ? 'text-red-500' : 'text-yellow-500'}`}>
+            <div className={`h-1.5 w-1.5 rounded-full ${
+              linkStatus === 'OK' ? 'bg-green-500' : 
+              linkStatus === 'ERROR' ? 'bg-red-500' : 
+              linkStatus === 'CONNECTING' ? 'bg-yellow-500 animate-pulse' : 
+              'bg-gray-500'
+            }`} />
+            <span className={`text-[9px] font-bold ${
+              linkStatus === 'OK' ? 'text-green-500' : 
+              linkStatus === 'ERROR' ? 'text-red-500' : 
+              linkStatus === 'CONNECTING' ? 'text-yellow-500' : 
+              'text-gray-500'
+            }`}>
               LINK: {linkStatus}
             </span>
           </div>
