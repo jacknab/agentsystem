@@ -49,7 +49,7 @@ const db = new Database();
 // Types
 interface CallState {
   callSid: string;
-  status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP";
+  status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP" | "BRIDGING";
   assignedAgent: string | null;
   customerName: string;
   queueName: string;
@@ -446,6 +446,12 @@ app.post("/twilio/status", (req, res) => {
         call.conferenceSid = ConferenceSid;
         db.updateCallStatus(CallSid, "QUEUED");
         io.emit("call.queued", call);
+      } else if (call.status === "BRIDGING" && ParticipantSid.startsWith('CA')) {
+        // Assume agent just joined - promote to ACTIVE
+        console.log(`[TWILIO] Agent joined conference for ${CallSid}. Setting ACTIVE.`);
+        call.status = "ACTIVE";
+        db.updateCallStatus(CallSid, "ACTIVE");
+        io.emit("call.active", call);
       }
     } else if (StatusCallbackEvent === "participant-leave") {
       // Handle cleanup if needed
@@ -494,9 +500,9 @@ app.post("/api/call/bridge", async (req, res) => {
 
     // Update assignment in state
     call.assignedAgent = agentId;
-    call.status = "ACTIVE";
+    call.status = "BRIDGING";
     db.assignAgent(callSid, agentId);
-    db.updateCallStatus(callSid, "ACTIVE");
+    db.updateCallStatus(callSid, "BRIDGING");
     db.updateUserStatus(agentId, 'busy');
 
     // Create an outbound call to the Agent's browser/client
@@ -515,6 +521,21 @@ app.post("/api/call/bridge", async (req, res) => {
     });
 
     io.emit("call.assigned", call);
+
+    // Timeout logic for bridge: if they don't join the conference in 30s, revert to QUEUED
+    setTimeout(() => {
+      const c = activeCalls.get(callSid);
+      if (c && c.status === 'BRIDGING' && c.assignedAgent === agentId) {
+        console.log(`[BRIDGE] Timeout linking ${agentId} to ${callSid}. Reverting to QUEUED.`);
+        c.status = 'QUEUED';
+        c.assignedAgent = null;
+        db.updateCallStatus(callSid, 'QUEUED');
+        db.assignAgent(callSid, null);
+        db.updateUserStatus(agentId, 'available'); // Release agent too
+        io.emit("call.queued", c);
+      }
+    }, 30000);
+
     res.json({ success: true });
   } catch (err) {
     console.error("[BRIDGE] Failed:", err);
@@ -697,6 +718,30 @@ io.on("connection", (socket) => {
     console.log("Client disconnected:", socket.id);
   });
 });
+
+// --- Periodic Queue Maintenance ---
+setInterval(() => {
+  const now = Date.now();
+  let queuedCount = 0;
+  
+  activeCalls.forEach((call, sid) => {
+    if (call.status === 'QUEUED') {
+      queuedCount++;
+      io.emit("call.queued", call); // Periodic remind
+    }
+  });
+
+  if (queuedCount > 0) {
+    console.log(`[HEARTBEAT] ${queuedCount} calls waiting in queue.`);
+    const available = db.getUsers().filter(u => u.role === 'agent' && u.status === 'available');
+    if (available.length > 0) {
+      console.log(`[HEARTBEAT] Notifying ${available.length} available agents about the queue.`);
+      available.forEach(a => {
+        io.emit("agent.offer", { agentId: a.id });
+      });
+    }
+  }
+}, 15000);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://localhost:${PORT}`);

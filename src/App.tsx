@@ -13,7 +13,7 @@ interface User {
 
 interface CallState {
   callSid: string;
-  status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP" | "LOOKUP";
+  status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP" | "LOOKUP" | "BRIDGING";
   assignedAgent: string | null;
   customerName: string;
   queueName: string;
@@ -32,6 +32,7 @@ const STATES = {
   BRIEFING: { label: 'BRIEFING', msg: 'Internal briefing phase for warm transfer.', color: 'sv-TRANSFER' },
   TRANSFER: { label: 'TRANSFERRING', msg: 'Call being transferred to Tier 2 support.', color: 'sv-TRANSFER' },
   WRAP: { label: 'WRAP-UP', msg: 'Call ended. Complete notes and disposition within 3 min.', color: 'sv-WRAP' },
+  BRIDGING: { label: 'CONNECTING...', msg: 'Linking your audio to the customer. Please wait.', color: 'sv-IDLE' },
 };
 
 const SCRIPTS = {
@@ -365,7 +366,10 @@ export default function App() {
         });
       },
       answer: () => {
-        const myInbound = calls.find(c => (c.status === "INBOUND" || c.status === "QUEUED") && (c.assignedAgent === AGENT_ID || !c.assignedAgent));
+        const myInbound = calls.find(c => 
+          ((c.status === "INBOUND" || c.status === "QUEUED") && (c.assignedAgent === AGENT_ID || !c.assignedAgent)) ||
+          (c.status === "BRIDGING" && c.assignedAgent === AGENT_ID)
+        );
         if (myInbound) {
           if (!device || device.state !== 'registered') {
             showNotify('ERROR: COMM-LINK OFFLINE (Check Keys)', 'error');
@@ -481,6 +485,20 @@ export default function App() {
         setAgentStatus('dnd');
         showNotify('CALL MISSED: SET TO DND', 'warn');
         setActiveCallSid(null);
+      }
+    });
+
+    newSocket.on("call.active", (call: CallState) => {
+      setCalls(prev => prev.map(c => c.callSid === call.callSid ? call : c));
+      if (call.assignedAgent === AGENT_ID) {
+        showNotify(`PBX BRIDGE ESTABLISHED`, 'ok');
+        setActiveCallSid(call.callSid);
+      }
+    });
+
+    newSocket.on("agent.offer", (data: { agentId: string }) => {
+      if (data.agentId === AGENT_ID && !activeCallSid) {
+        showNotify('NEW CALL IN QUEUE - PRESS [A]', 'warn');
       }
     });
 
@@ -1280,10 +1298,10 @@ export default function App() {
                   <span className="opt-text">{o.label}</span>
                 </button>
               ))
-            ) : callState === 'QUEUED' ? (
+            ) : callState === 'QUEUED' || (callState === 'BRIDGING' && !twilioCall) ? (
               <button className="opt-btn" onClick={() => execCmd('A')}>
                 <span className="opt-key">[A]</span>
-                <span className="opt-text">Accept Call</span>
+                <span className="opt-text">{callState === 'BRIDGING' ? 'Retry Answer' : 'Accept Call'}</span>
               </button>
             ) : callState === 'BRIEFING' && activeCall?.toAgent === AGENT_ID ? (
               <button className="opt-btn" onClick={() => execCmd('T')}>
