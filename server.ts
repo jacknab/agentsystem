@@ -150,69 +150,109 @@ app.post("/api/call/dial", async (req, res) => {
   if (!number || !agentId) return res.status(400).json({ error: "Missing number or agentId" });
 
   const formattedNumber = number.startsWith('+') ? number : `+1${number.replace(/\D/g, '')}`;
-  const callSid = `out_${Date.now()}`; // Pseudo SID for tracking until Twilio gives us real one
+  const customerCallSid = `out_${Date.now()}`; 
 
   console.log(`[OUTBOUND] Agent ${agentId} is dialing ${formattedNumber}`);
 
   try {
+    if (!twilioClient) {
+      console.error("[OUTBOUND] Twilio client not initialized. Check SID/Auth Token.");
+      return res.status(500).json({ error: "Twilio credentials missing on server" });
+    }
+
+    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+    if (!fromNumber) {
+      console.error("[OUTBOUND] TWILIO_PHONE_NUMBER not set in environment.");
+      return res.status(500).json({ error: "Server missing Twilio phone number configuration." });
+    }
+
     // 1. Create a placeholder call state
     const callState: CallState = {
-      callSid: callSid,
-      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
-      to: formattedNumber,
+      callSid: customerCallSid,
       status: 'BRIDGING',
       assignedAgent: agentId,
-      timestamp: Date.now()
+      customerName: formattedNumber, // Use number as name for automated display
+      queueName: 'OUTBOUND'
     };
-    activeCalls.set(callSid, callState);
+    activeCalls.set(customerCallSid, callState);
 
     // 2. Fetch Base URL for TwiML callbacks
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
       const protocol = req.headers['x-forwarded-proto'] || 'https';
+      // Use x-forwarded-host for Cloud Run environments if available
       const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
       const hostStr = Array.isArray(host) ? host[0] : host;
+      
       if (hostStr && hostStr.includes("-dev-")) {
+        // Force -pre- for callbacks as -dev- might be behind auth/different routing
         baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
       } else if (hostStr) {
         baseUrl = `${protocol}://${hostStr}`;
       }
     }
 
+    console.log(`[OUTBOUND] Agent ${agentId} dialing ${formattedNumber} via ${fromNumber}`);
+    console.log(`[OUTBOUND] TwiML Base URL: ${baseUrl}`);
+
     // 3. Dial the Customer first, then move them to conference
     const customerCall = await twilioClient.calls.create({
       to: formattedNumber,
-      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
-      url: `${baseUrl}/twilio/outbound-join?confName=conf_${callSid}`
+      from: fromNumber,
+      url: `${baseUrl}/twilio/outbound-join?confName=conf_${customerCallSid}`
+    }).catch((err: any) => {
+        console.error('[TWILIO] Customer Dial Error:', err.message);
+        throw new Error(`Twilio rejected customer dial: ${err.message}`);
     });
 
-    // Update the real SID
-    activeCalls.delete(callSid);
+    // Map both the real SID and the placeholder for tracking
     callState.callSid = customerCall.sid;
     activeCalls.set(customerCall.sid, callState);
+    // Keep customerCallSid mapping as it's used for the conference FriendlyName
+    activeCalls.set(customerCallSid, callState); 
 
-    // 4. Dial the Agent
+    // 4. Dial the Agent - Use the same placeholder SID to match the customer's conference
     await twilioClient.calls.create({
       to: `client:${agentId}`,
-      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
-      url: `${baseUrl}/twilio/agent-join?confName=conf_${customerCall.sid}`
+      from: fromNumber,
+      url: `${baseUrl}/twilio/agent-join?confName=conf_${customerCallSid}`
+    }).catch((err: any) => {
+        console.error('[TWILIO] Agent Dial Error:', err.message);
+        throw new Error(`Twilio rejected agent dial: ${err.message}`);
     });
 
     res.json({ success: true, callSid: customerCall.sid });
-  } catch (err) {
-    console.error('[OUTBOUND] Dial failed:', err);
-    res.status(500).json({ error: "Dial failed" });
+  } catch (err: any) {
+    console.error('[OUTBOUND] Final catch:', err.message);
+    res.status(500).json({ error: err.message || "Dial failed" });
   }
 });
 
 // Endpoint for customer side of outbound call
 app.post("/twilio/outbound-join", (req, res) => {
   const { confName } = req.query;
+  
+  // Determine the status callback URL
+  let baseUrl = process.env.APP_URL || "";
+  if (!baseUrl || baseUrl.includes("-dev-")) {
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
+    const hostStr = Array.isArray(host) ? host[0] : host;
+    if (hostStr && hostStr.includes("-dev-")) {
+      baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
+    } else if (hostStr) {
+      baseUrl = `${protocol}://${hostStr}`;
+    }
+  }
+  const statusCallback = `${baseUrl}/twilio/status`;
+
   const twiml = new twilio.twiml.VoiceResponse();
   const dial = twiml.dial();
   dial.conference({
     startConferenceOnEnter: true,
     endConferenceOnExit: true,
+    statusCallbackEvent: ["start", "end", "join", "leave"],
+    statusCallback: statusCallback,
     waitUrl: 'http://twimlets.com/holdmusic?Queue=standard'
   }, confName as string);
   res.type('text/xml');

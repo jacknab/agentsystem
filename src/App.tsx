@@ -691,21 +691,28 @@ export default function App() {
     // Outbound Dial (e.g. D7202436886)
     if (input.startsWith("D")) {
       const number = input.substring(1).replace(/\D/g, "");
-      if (number.length >= 10) {
-        showNotify(`DIALING: ${number}...`, "info");
+      if (number.length === 10) {
+        showNotify(`INITIATING OUTBOUND: +1${number}`, "info");
+        setLinkStatus('BRIDGING');
         fetch("/api/call/dial", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ number, agentId: AGENT_ID })
-        }).then(res => {
+        }).then(async (res) => {
           if (res.ok) {
-            setMenuMode("MAIN");
+            setMenuMode("PHONE");
+            setLinkStatus('ACTIVE');
           } else {
-            showNotify("DIAL FAILED", "err");
+            const data = await res.json();
+            setLinkStatus('OK');
+            showNotify(`OUTBOUND FAILED: ${data.error || 'Server error'}`, "err");
           }
+        }).catch(err => {
+          setLinkStatus('OK');
+          showNotify("NETWORK ERROR", "err");
         });
       } else {
-        showNotify("INVALID DIAL: Needs 10 digits", "warn");
+        showNotify("DIAL ERROR: USE 10 DIGITS", "warn");
       }
       setCmd("");
       return;
