@@ -66,16 +66,16 @@ app.get("/api/admin/agents", (req, res) => {
 });
 
 app.post("/api/admin/agents", (req, res) => {
-  const { id, name, pin } = req.body;
-  if (!id || !name || !pin) return res.status(400).json({ error: "Missing fields" });
-  db.createAgent(id, name, pin);
+  const { id, name, pin, loginCode } = req.body;
+  if (!id || !name || !pin || !loginCode) return res.status(400).json({ error: "Missing fields" });
+  db.createAgent(id, name, pin, loginCode);
   res.json({ success: true });
 });
 
 app.put("/api/admin/agents/:id", (req, res) => {
   const { id } = req.params;
-  const { name, pin } = req.body;
-  db.updateAgent(id, name, pin);
+  const { name, pin, loginCode } = req.body;
+  db.updateAgent(id, name, pin, loginCode);
   res.json({ success: true });
 });
 
@@ -292,6 +292,20 @@ app.post("/twilio/inbound", (req, res) => {
     };
     activeCalls.set(CallSid, state);
 
+    // Determine the status callback URL
+    let baseUrl = process.env.APP_URL || "";
+    if (!baseUrl || baseUrl.includes("-dev-")) {
+      const protocol = req.headers['x-forwarded-proto'] || 'http';
+      const host = req.headers['host'] || "";
+      let detectedUrl = `${protocol}://${host}`;
+      if (detectedUrl.includes("-dev-")) {
+        baseUrl = detectedUrl.replace("-dev-", "-pre-");
+      } else {
+        baseUrl = detectedUrl;
+      }
+    }
+    const statusCallback = `${baseUrl}/twilio/status`;
+
     if (availableAgent) {
       twiml.say("Connecting you to an agent.");
       assignCallToAgent(CallSid, availableAgent.id);
@@ -306,33 +320,13 @@ app.post("/twilio/inbound", (req, res) => {
       io.emit("call.queued", state);
       
       const dial = twiml.dial();
-      dial.conference("Main Queue", {
-        waitUrl: process.env.HOLD_MUSIC_URL,
+      dial.conference({
+        waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
+        statusCallbackEvent: ["start", "end", "join", "leave", "mute", "hold"],
+        statusCallback: statusCallback,
         startConferenceOnEnter: true,
-      });
+      }, `conf_${CallSid}`);
     }
-    
-    // Determine the status callback URL
-    let baseUrl = process.env.APP_URL || "";
-    if (!baseUrl || baseUrl.includes("-dev-")) {
-      const protocol = req.headers['x-forwarded-proto'] || 'http';
-      const host = req.headers['host'] || "";
-      let detectedUrl = `${protocol}://${host}`;
-      if (detectedUrl.includes("-dev-")) {
-        baseUrl = detectedUrl.replace("-dev-", "-pre-");
-      } else {
-        baseUrl = detectedUrl;
-      }
-    }
-    
-    const statusCallback = `${baseUrl}/twilio/status`;
-    console.log(`[TWILIO] Using statusCallback: ${statusCallback}`);
-
-    dial.conference({
-      waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
-      statusCallbackEvent: ["start", "end", "join", "leave", "mute", "hold"],
-      statusCallback: statusCallback,
-    }, `conf_${CallSid}`);
 
     console.log(`[TWILIO] TwiML generated for SID=${CallSid}`);
     res.type("text/xml");

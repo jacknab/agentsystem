@@ -151,7 +151,7 @@ export default function App() {
   const [editingScript, setEditingScript] = useState<string | null>(null);
   const [editingAgent, setEditingAgent] = useState<any | null>(null);
   const [editForm, setEditForm] = useState<{ read: string; guide: string; options: { key: string; label: string }[] }>({ read: '', guide: '', options: [] });
-  const [agentForm, setAgentForm] = useState({ name: '', pin: '' });
+  const [agentForm, setAgentForm] = useState({ name: '', pin: '', loginCode: '' });
   const [activeCallSid, setActiveCallSid] = useState<string | null>(null);
   const [cmd, setCmd] = useState('');
   const [menuMode, setMenuMode] = useState<'MAIN' | 'PHONE'>('MAIN');
@@ -477,16 +477,17 @@ export default function App() {
 
     if (mode === 'ADMIN') {
       if (input.startsWith("CREATE ")) {
-        // ... (existing code omitted for brevity but I'll keep it)
         const parts = input.split(" ");
-        if (parts.length >= 4) {
+        // CREATE [id] [name...] [pin] [code]
+        if (parts.length >= 5) {
           const id = parts[1];
-          const pin = parts[parts.length - 1];
-          const name = parts.slice(2, -1).join(" ");
+          const loginCode = parts[parts.length - 1];
+          const pin = parts[parts.length - 2];
+          const name = parts.slice(2, -2).join(" ");
           fetch("/api/admin/agents", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, name, pin })
+            body: JSON.stringify({ id, name, pin, loginCode })
           }).then(() => {
             showNotify(`AGENT ${id} CREATED`, 'ok');
             fetchAdminData();
@@ -752,13 +753,13 @@ export default function App() {
                     <div key={a.id} className="flex justify-between items-center py-2 border-b border-[#1a1a1a] text-xs">
                       <div className="flex flex-col">
                         <span className={a.id === AGENT_ID ? 'text-green-500' : 'text-white'}>{a.name} ({a.id})</span>
-                        <span className="text-gray-600 text-[10px]">PIN: {a.pin}</span>
+                        <span className="text-gray-600 text-[10px]">PIN: {a.pin} | CODE: {a.login_code || 'N/A'}</span>
                       </div>
                       <div className="flex gap-2">
                         <button 
                           onClick={() => {
                             setEditingAgent(a);
-                            setAgentForm({ name: a.name, pin: a.pin });
+                            setAgentForm({ name: a.name, pin: a.pin, loginCode: a.login_code || '' });
                           }} 
                           className="text-[#4f8ef7] hover:underline"
                         >EDIT</button>
@@ -795,6 +796,13 @@ export default function App() {
                         placeholder="PIN"
                         onChange={e => setAgentForm({ ...agentForm, pin: e.target.value })}
                       />
+                      <input 
+                        className="w-full bg-[#111] border border-[#333] text-xs p-2 outline-none focus:border-[#4f8ef7]"
+                        value={agentForm.loginCode}
+                        placeholder="7-Digit Login Code"
+                        maxLength={7}
+                        onChange={e => setAgentForm({ ...agentForm, loginCode: e.target.value })}
+                      />
                       <div className="flex gap-2 pt-1">
                         <button 
                           onClick={() => {
@@ -819,8 +827,8 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="text-[9px] text-[#4f8ef7] p-2 bg-black border border-[#222] font-mono leading-relaxed">
-                    CMD: CREATE [ID] [NAME] [PIN]<br />
-                    Ex: CREATE agent-10 Jack 1234
+                    CMD: CREATE [ID] [NAME] [PIN] [CODE]<br />
+                    Ex: CREATE agent-10 Jack 1234 1112223
                   </div>
                 )}
               </div>

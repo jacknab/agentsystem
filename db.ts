@@ -129,14 +129,14 @@ export class Database {
     return this.db.prepare("SELECT * FROM agent_logs ORDER BY timestamp DESC").all();
   }
 
-  createAgent(id: string, name: string, pin: string) {
-    const stmt = this.db.prepare("INSERT INTO users (id, name, role, status, pin) VALUES (?, ?, 'agent', 'available', ?)");
-    return stmt.run(id, name, pin);
+  createAgent(id: string, name: string, pin: string, loginCode: string) {
+    const stmt = this.db.prepare("INSERT INTO users (id, name, role, status, pin, login_code) VALUES (?, ?, 'agent', 'available', ?, ?)");
+    return stmt.run(id, name, pin, loginCode);
   }
 
-  updateAgent(id: string, name: string, pin: string) {
-    const stmt = this.db.prepare("UPDATE users SET name = ?, pin = ? WHERE id = ?");
-    return stmt.run(name, pin, id);
+  updateAgent(id: string, name: string, pin: string, loginCode: string) {
+    const stmt = this.db.prepare("UPDATE users SET name = ?, pin = ?, login_code = ? WHERE id = ?");
+    return stmt.run(name, pin, loginCode, id);
   }
 
   deleteAgent(id: string) {
