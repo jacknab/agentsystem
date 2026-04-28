@@ -29,11 +29,20 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Twilio Client
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+// Twilio Client - Lazy init or handled safely
+let twilioClient: any;
+try {
+  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+    twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+  } else {
+    console.warn("[TWILIO] Missing credentials. Twilio features will be disabled.");
+  }
+} catch (err) {
+  console.error("[TWILIO] Initialization error:", err);
+}
 
 const db = new Database();
 
@@ -155,6 +164,108 @@ app.get("/twilio/test", (req, res) => {
   `);
 });
 
+// --- Auth ---
+app.get("/api/auth/token", (req, res) => {
+  const identity = req.query.identity as string;
+  if (!identity) return res.status(400).send("Identity required");
+
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_VOICE_API_KEY || !process.env.TWILIO_VOICE_API_SECRET) {
+    return res.status(500).json({ error: "Twilio credentials missing on server" });
+  }
+
+  const AccessToken = twilio.jwt.AccessToken;
+  const VoiceGrant = AccessToken.VoiceGrant;
+
+  const token = new AccessToken(
+    process.env.TWILIO_ACCOUNT_SID,
+    process.env.TWILIO_VOICE_API_KEY,
+    process.env.TWILIO_VOICE_API_SECRET,
+    { identity }
+  );
+
+  const voiceGrant = new VoiceGrant({
+    incomingAllow: true, // Allow incoming calls to browser
+  });
+
+  token.addGrant(voiceGrant);
+  res.json({ token: token.toJwt() });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const { code } = req.body;
+  const user = db.getAgentByLoginCode(code);
+
+  if (user) {
+    res.json({ 
+      success: true, 
+      user: {
+        id: user.id,
+        name: user.name,
+        role: user.role
+      }
+    });
+  } else {
+    res.status(401).json({ success: false, message: "Invalid Access Code" });
+  }
+});
+
+// --- Agent Status ---
+app.post("/api/agent/status", (req, res) => {
+  const { agentId, status } = req.body;
+  db.updateUserStatus(agentId, status);
+  
+  // If agent becomes available, check if there's someone in queue
+  if (status === 'available') {
+    processNextInQueue(agentId);
+  }
+  
+  res.json({ success: true });
+});
+
+async function assignCallToAgent(callSid: string, agentId: string) {
+  const call = activeCalls.get(callSid);
+  if (!call) return;
+
+  call.assignedAgent = agentId;
+  call.status = "INBOUND";
+  db.assignAgent(callSid, agentId);
+  db.updateUserStatus(agentId, 'busy');
+  db.updateCallStatus(callSid, "INBOUND");
+  
+  io.emit("call.assigned", call);
+
+  // Rollover logic: 30s to answer
+  setTimeout(() => {
+    const currentCall = activeCalls.get(callSid);
+    if (currentCall && currentCall.assignedAgent === agentId && currentCall.status === 'INBOUND') {
+      console.log(`Call ${callSid} missed by ${agentId}. Rolling over.`);
+      
+      db.updateUserStatus(agentId, 'dnd'); // Silent the agent
+      
+      currentCall.assignedAgent = null;
+      currentCall.status = "QUEUED";
+      db.updateCallStatus(callSid, "QUEUED");
+      db.assignAgent(callSid, "");
+      
+      io.emit("call.queued", currentCall);
+      io.emit("agent.missed", { agentId, callSid });
+
+      // Try next available
+      const nextAgent = db.getAvailableAgent();
+      if (nextAgent) {
+        processNextInQueue(nextAgent.id);
+      }
+    }
+  }, 30000);
+}
+
+async function processNextInQueue(agentId: string) {
+  const nextCall = db.getOldestQueuedCall();
+  if (nextCall) {
+    assignCallToAgent(nextCall.callSid, agentId);
+  }
+}
+
 app.post("/twilio/inbound", (req, res) => {
   try {
     const { CallSid, From } = req.body;
@@ -167,24 +278,39 @@ app.post("/twilio/inbound", (req, res) => {
       return res.status(400).send("Missing CallSid");
     }
 
-    // Create call record in DB
-    db.createCall(CallSid, "INBOUND", From || "Unknown");
+    const availableAgent = db.getAvailableAgent();
+    const initialStatus = availableAgent ? "INBOUND" : "QUEUED";
 
-    twiml.say("Connecting you to the next available agent.");
+    db.createCall(CallSid, initialStatus, From || "Unknown");
 
     const state: CallState = {
       callSid: CallSid,
-      status: "INBOUND",
-      assignedAgent: null,
+      status: initialStatus,
+      assignedAgent: availableAgent ? availableAgent.id : null,
       customerName: From || "Unknown",
       queueName: "Main Queue",
     };
     activeCalls.set(CallSid, state);
 
-    io.emit("call.inbound", state);
-
-    // Place into a conference (queue)
-    const dial = twiml.dial();
+    if (availableAgent) {
+      twiml.say("Connecting you to an agent.");
+      assignCallToAgent(CallSid, availableAgent.id);
+      
+      const dial = twiml.dial({
+        timeout: 30,
+        callerId: From,
+      });
+      dial.client(availableAgent.id);
+    } else {
+      twiml.say("All agents are currently busy. Please stay on the line.");
+      io.emit("call.queued", state);
+      
+      const dial = twiml.dial();
+      dial.conference("Main Queue", {
+        waitUrl: process.env.HOLD_MUSIC_URL,
+        startConferenceOnEnter: true,
+      });
+    }
     
     // Determine the status callback URL
     let baseUrl = process.env.APP_URL || "";
@@ -272,6 +398,7 @@ app.post("/twilio/hold", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
+      if (!twilioClient) throw new Error("Twilio client not initialized");
       // Mute the customer and play music (or just mute in conference)
       // For real hold, we might move them to a different conference or use 'hold' attribute if supported
       await twilioClient.conferences(call.conferenceSid)
@@ -299,6 +426,7 @@ app.post("/twilio/resume", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
+      if (!twilioClient) throw new Error("Twilio client not initialized");
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
         .update({ hold: false });
@@ -324,17 +452,23 @@ app.post("/twilio/transfer/initiate", async (req, res) => {
   const call = activeCalls.get(callSid);
 
   if (call && call.conferenceSid) {
-    // 1. Put customer on HOLD
-    await twilioClient.conferences(call.conferenceSid)
-      .participants(callSid)
-      .update({ hold: true, holdUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" });
+    try {
+      if (!twilioClient) throw new Error("Twilio client not initialized");
+      // 1. Put customer on HOLD
+      await twilioClient.conferences(call.conferenceSid)
+        .participants(callSid)
+        .update({ hold: true, holdUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" });
 
-    // 2. Bring Agent B into BRIEFING (simulated via WebSockets / Browser SIP)
-    call.status = "BRIEFING";
-    db.createTransfer(callSid, fromAgent, toAgent);
-    io.emit("call.briefing_started", { ...call, fromAgent, toAgent });
+      // 2. Bring Agent B into BRIEFING (simulated via WebSockets / Browser SIP)
+      call.status = "BRIEFING";
+      db.createTransfer(callSid, fromAgent, toAgent);
+      io.emit("call.briefing_started", { ...call, fromAgent, toAgent });
 
-    res.json({ success: true });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to initiate transfer" });
+    }
   } else {
     res.status(404).json({ error: "Call not found" });
   }
@@ -345,18 +479,24 @@ app.post("/twilio/transfer/complete", async (req, res) => {
   const call = activeCalls.get(callSid);
 
   if (call && call.conferenceSid) {
-    // 3. Reconnect customer to Agent B
-    await twilioClient.conferences(call.conferenceSid)
-      .participants(callSid)
-      .update({ hold: false });
+    try {
+      if (!twilioClient) throw new Error("Twilio client not initialized");
+      // 3. Reconnect customer to Agent B
+      await twilioClient.conferences(call.conferenceSid)
+        .participants(callSid)
+        .update({ hold: false });
 
-    // 4. Remove Agent A (simulated by updating state)
-    call.status = "ACTIVE";
-    call.assignedAgent = toAgent;
-    db.assignAgent(callSid, toAgent);
-    io.emit("call.transferred", call);
+      // 4. Remove Agent A (simulated by updating state)
+      call.status = "ACTIVE";
+      call.assignedAgent = toAgent;
+      db.assignAgent(callSid, toAgent);
+      io.emit("call.transferred", call);
 
-    res.json({ success: true });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to complete transfer" });
+    }
   } else {
     res.status(404).json({ error: "Call not found" });
   }
@@ -366,14 +506,17 @@ app.post("/api/call/end", (req, res) => {
   const { callSid } = req.body;
   const call = activeCalls.get(callSid);
   if (call) {
+    const agentId = call.assignedAgent;
     call.status = "WRAP";
     db.updateCallStatus(callSid, "WRAP");
     io.emit("call.ended", call);
     
-    // Finalize after some time or agent action
+    // In WRAP, the agent is still 'busy' in the DB until they go READY
+    
+    // Finalize record after 1 minute
     setTimeout(() => {
       activeCalls.delete(callSid);
-    }, 60000); // 1 minute wrap-up
+    }, 60000);
     
     res.json({ success: true });
   } else {

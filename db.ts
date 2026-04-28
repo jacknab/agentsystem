@@ -23,6 +23,17 @@ export class Database {
       )
     `);
 
+    // Migration: Add login_code column if it doesn't exist
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(users)").all();
+      const hasLoginCode = tableInfo.some((col: any) => col.name === 'login_code');
+      if (!hasLoginCode) {
+        this.db.exec("ALTER TABLE users ADD COLUMN login_code TEXT UNIQUE");
+      }
+    } catch (err) {
+      console.error("Migration error (users table):", err);
+    }
+
     // Calls table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS calls (
@@ -61,13 +72,21 @@ export class Database {
       )
     `);
 
-    // Seed admin if not exists
+    // Seed agents if not exists or if they missing login_code
     const admin = this.db.prepare("SELECT * FROM users WHERE id = ?").get("admin-001");
     if (!admin) {
-      this.db.prepare("INSERT INTO users (id, name, email, role, status, pin) VALUES (?, ?, ?, ?, ?, ?)")
-        .run("admin-001", "System Admin", "admin@certxa.com", "admin", "available", "1234");
-      this.db.prepare("INSERT INTO users (id, name, email, role, status, pin) VALUES (?, ?, ?, ?, ?, ?)")
-        .run("agent-001", "Agent Smith", "smith@certxa.com", "agent", "available", "0000");
+      this.db.prepare("INSERT INTO users (id, name, email, role, status, pin, login_code) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run("admin-001", "System Admin", "admin@certxa.com", "admin", "available", "1234", "9999999");
+    } else if (!admin.login_code) {
+      this.db.prepare("UPDATE users SET login_code = ? WHERE id = ?").run("9999999", "admin-001");
+    }
+
+    const agent = this.db.prepare("SELECT * FROM users WHERE id = ?").get("agent-001");
+    if (!agent) {
+      this.db.prepare("INSERT INTO users (id, name, email, role, status, pin, login_code) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run("agent-001", "Agent Smith", "smith@certxa.com", "agent", "available", "0000", "1234567");
+    } else if (!agent.login_code) {
+      this.db.prepare("UPDATE users SET login_code = ? WHERE id = ?").run("1234567", "agent-001");
     }
   }
 
@@ -172,5 +191,26 @@ export class Database {
     `);
     const optionsStr = JSON.stringify(options);
     return stmt.run(state, read, guide, optionsStr);
+  }
+
+  updateUserStatus(id: string, status: string) {
+    const stmt = this.db.prepare("UPDATE users SET status = ? WHERE id = ?");
+    return stmt.run(status, id);
+  }
+
+  getAvailableAgent() {
+    return this.db.prepare("SELECT * FROM users WHERE role = 'agent' AND status = 'available' LIMIT 1").get();
+  }
+
+  getOldestQueuedCall() {
+    return this.db.prepare("SELECT * FROM calls WHERE status = 'QUEUED' ORDER BY createdAt ASC LIMIT 1").get();
+  }
+
+  getAgentByLoginCode(code: string) {
+    return this.db.prepare("SELECT * FROM users WHERE login_code = ?").get(code);
+  }
+
+  getAgentById(id: string) {
+    return this.db.prepare("SELECT * FROM users WHERE id = ?").get(id);
   }
 }

@@ -2,9 +2,18 @@
 
 This guide provides step-by-step instructions for deploying your PBX Monitor & Simulator on a private VPS (e.g., DigitalOcean, Linode, AWS).
 
-## 1. Prerequisites
+## 1. Automated Setup (Recommended)
 
-*   **Node.js**: v18 or higher.
+If you are using a clean Ubuntu or Debian VPS, you can use the automated setup script:
+
+```bash
+chmod +x vps-setup.sh
+sudo ./vps-setup.sh
+```
+
+This script will install Node.js, PM2, and all project dependencies.
+
+## 2. Prerequisites (Manual)
 *   **npm**: v9 or higher.
 *   **A Public Domain or IP**: Required for Twilio to send webhooks.
 *   **Twilio Account**: With a Phone Number and API credentials.

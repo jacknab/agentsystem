@@ -1,8 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 import { motion, AnimatePresence } from "motion/react";
+import { Device, Call } from "@twilio/voice-sdk";
 
 // --- Types ---
+interface User {
+  id: string;
+  name: string;
+  role: 'agent' | 'admin';
+}
+
 interface CallState {
   callSid: string;
   status: "IDLE" | "INBOUND" | "QUEUED" | "HOLD" | "BRIEFING" | "ACTIVE" | "TRANSFER" | "WRAP" | "LOOKUP";
@@ -13,8 +20,6 @@ interface CallState {
   fromAgent?: string;
   toAgent?: string;
 }
-
-const AGENT_ID = "agent-001"; // Simulated current agent
 
 const STATES = {
   IDLE: { label: 'IDLE', msg: 'No active call. Waiting for next inbound.', color: 'sv-IDLE' },
@@ -131,6 +136,12 @@ function Notify({ msg, type, onDone }: { msg: string; type: string; onDone: () =
 }
 
 export default function App() {
+  const [user, setUser] = useState<User | null>(() => {
+    const saved = localStorage.getItem('agent_session');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const AGENT_ID = user?.id || 'GUEST';
+
   const [socket, setSocket] = useState<Socket | null>(null);
   const [calls, setCalls] = useState<CallState[]>([]);
   const [mode, setMode] = useState<'AGENT' | 'ADMIN' | 'MONITOR'>('AGENT');
@@ -144,6 +155,69 @@ export default function App() {
   const [activeCallSid, setActiveCallSid] = useState<string | null>(null);
   const [cmd, setCmd] = useState('');
   const [menuMode, setMenuMode] = useState<'MAIN' | 'PHONE'>('MAIN');
+  const [isAccepting, setIsAccepting] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<'available' | 'busy' | 'dnd'>('busy');
+
+  const [device, setDevice] = useState<Device | null>(null);
+  const [twilioCall, setTwilioCall] = useState<Call | null>(null);
+
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const initTwilio = async () => {
+      try {
+        const res = await fetch(`/api/auth/token?identity=${user.id}`);
+        const { token } = await res.json();
+        
+        const newDevice = new Device(token, {
+          logLevel: 1,
+          codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
+        });
+
+        newDevice.on('registered', () => {
+          showNotify('VOIP DEVICE REGISTERED', 'ok');
+        });
+
+        newDevice.on('error', (error) => {
+          console.error('Twilio Device Error:', error);
+          showNotify(`VOIP ERROR: ${error.message}`, 'warn');
+        });
+
+        newDevice.on('incoming', (call) => {
+          showNotify('INCOMING VOIP CONNECTION', 'warn');
+          setTwilioCall(call);
+          
+          call.on('disconnect', () => {
+            setTwilioCall(null);
+            showNotify('VOIP CALL DISCONNECTED', 'info');
+          });
+        });
+
+        await newDevice.register();
+        setDevice(newDevice);
+      } catch (err) {
+        console.error('Twilio Init failed:', err);
+      }
+    };
+
+    initTwilio();
+    return () => {
+      if (device) {
+        device.destroy();
+        setDevice(null);
+      }
+    };
+  }, [user?.id]);
+
+  useEffect(() => {
+    fetch("/api/agent/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: AGENT_ID, status: agentStatus })
+    }).catch(err => console.error("Sync failed:", err));
+  }, [agentStatus]);
 
   const fetchAdminData = useCallback(async () => {
     try {
@@ -166,10 +240,12 @@ export default function App() {
     if (mode === 'ADMIN') fetchAdminData();
   }, [mode, fetchAdminData]);
   const [notify, setNotify] = useState<{ id: number; msg: string; type: string } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const activeCall = calls.find(c => c.callSid === activeCallSid) || calls.find(c => c.assignedAgent === AGENT_ID);
-  const inboundCall = calls.find(c => c.status === 'INBOUND' || c.status === 'QUEUED');
+  const inboundCall = calls.find(c => 
+    (c.status === 'INBOUND' || c.status === 'QUEUED') && 
+    (c.assignedAgent === AGENT_ID || !c.assignedAgent)
+  );
   const queuedCount = calls.filter(c => c.status === 'INBOUND' || c.status === 'QUEUED').length;
 
   const showNotify = useCallback((msg: string, type = 'info') => {
@@ -221,6 +297,9 @@ export default function App() {
 
     newSocket.on("call.inbound", (call: CallState) => {
       setCalls(prev => [...prev, call]);
+      if (call.assignedAgent === AGENT_ID) {
+        setAgentStatus('busy');
+      }
       showNotify(`TWILIO WH: call.inbound received`, 'warn');
     });
 
@@ -233,6 +312,8 @@ export default function App() {
       setCalls(prev => prev.map(c => c.callSid === call.callSid ? call : c));
       if (call.assignedAgent === AGENT_ID) {
         setActiveCallSid(call.callSid);
+        setIsAccepting(false); 
+        setAgentStatus('busy');
         showNotify(`Account loaded: ${call.customerName}`, 'ok');
       }
     });
@@ -262,14 +343,68 @@ export default function App() {
       showNotify(`WH: call.ended — wrap-up mode`, 'info');
     });
 
+    newSocket.on("agent.missed", (data: { agentId: string, callSid: string }) => {
+      if (data.agentId === AGENT_ID) {
+        setAgentStatus('dnd');
+        showNotify('CALL MISSED: SET TO DND', 'warn');
+        setActiveCallSid(null);
+      }
+    });
+
     return () => { newSocket.close(); };
-  }, [showNotify]);
+  }, [showNotify, AGENT_ID]);
 
   const execCmd = useCallback((raw: string) => {
     const input = raw.trim().toUpperCase();
     if (!input) return;
 
-    // Global Mode Switches
+    // --- Authentication Commands ---
+    if (input === "LOGIN") {
+      showNotify("LOGIN_REQUIRED: USE 'LOGIN <7-DIGIT-CODE>'", "warn");
+      setCmd("");
+      return;
+    }
+
+    if (input.startsWith("LOGIN ")) {
+      const parts = input.split(" ");
+      const code = parts[1];
+      if (!code || code.length !== 7) {
+        showNotify("INVALID_COMMAND: USE LOGIN <7-DIGIT-CODE>", "err");
+        setCmd("");
+        return;
+      }
+
+      fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          setUser(data.user);
+          localStorage.setItem('agent_session', JSON.stringify(data.user));
+          showNotify(`ACCESS_GRANTED: WELCOME ${data.user.name.toUpperCase()}`, 'ok');
+          setCmd("");
+        } else {
+          showNotify(`AUTH_FAILURE: ${data.message.toUpperCase()}`, 'err');
+          setCmd("");
+        }
+      })
+      .catch(() => {
+        showNotify("NETWORK_ERROR: CANNOT REACH AUTH_SERVER", "err");
+        setCmd("");
+      });
+      return;
+    }
+
+    // Global Mode Switches - Allow even if not logged in so user can see admin/monitor screens
+    if (input === "HELP") {
+      showNotify("AUTH_REQUIRED: TYPE 'LOGIN <7-DIGIT-CODE>' TO START SESSION", "info");
+      setCmd("");
+      return;
+    }
+
     if (input === "ADMIN") {
       setMode('ADMIN');
       showNotify('ADMIN OVERRIDE: Agent Management Active', 'warn');
@@ -289,6 +424,25 @@ export default function App() {
       return;
     }
 
+    if (input === "SIGNOFF" || input === "LOGOUT" || input === "EXIT") {
+      if (!user) {
+        showNotify("SYSTEM_ALREADY_LOCKED", "info");
+      } else {
+        const userId = user.id;
+        logout();
+        showNotify(`SESSION_TERMINATED: ${userId} SIGNED OFF`, "warn");
+      }
+      setCmd("");
+      return;
+    }
+
+    // Block all other commands if not logged in
+    if (!user) {
+      showNotify("AUTH_REQUIRED: TYPE 'LOGIN <CODE>'", "err");
+      setCmd("");
+      return;
+    }
+
     // "Back" Logic
     if (input === "0" || input === "B" || input === "BACK") {
       if (menuMode === 'PHONE') {
@@ -304,6 +458,19 @@ export default function App() {
     if (input === "00") {
       setMenuMode('PHONE');
       showNotify('PHONE_SUBMENU ACTIVATED (H/R/X/B/T)', 'info');
+      setCmd('');
+      return;
+    }
+
+    if (input === "READY" || (input === "R" && menuMode === 'MAIN')) {
+      setAgentStatus('available');
+      showNotify('AGENT STATUS: READY', 'ok');
+      setCmd('');
+      return;
+    }
+    if (input === "DND") {
+      setAgentStatus('dnd');
+      showNotify('AGENT STATUS: DND (Busy)', 'warn');
       setCmd('');
       return;
     }
@@ -372,8 +539,24 @@ export default function App() {
       setMenuMode('MAIN');
     } else {
       if (input === "A" || input === "ACCEPT") {
+        setIsAccepting(true);
+        // Immediately move the call out of INBOUND state locally to hide the box instantly
+        if (inboundCall) {
+          setCalls(prev => prev.map(c => c.callSid === inboundCall.callSid ? { ...c, status: 'IDLE' } : c));
+        }
+
+        // Accept WebRTC audio if pending
+        if (twilioCall) {
+          twilioCall.accept();
+        }
+
+        // Safety timeout to reset accepting state if socket update fails
+        setTimeout(() => setIsAccepting(false), 5000);
         triggerWebhook('answer');
       } else if (input === "W" || input === "WRAP") {
+        if (twilioCall) {
+          twilioCall.disconnect();
+        }
         triggerWebhook('wrap');
         // W key now clears data as requested
         setCalls([]); 
@@ -399,6 +582,8 @@ export default function App() {
       }
     }
     setCmd('');
+    // Ensure focus returns to input after any command
+    setTimeout(() => inputRef.current?.focus(), 10);
   }, [triggerWebhook, activeCallSid, calls, showNotify, menuMode, mode, fetchAdminData]);
 
   const [isFocused, setIsFocused] = useState(true);
@@ -472,8 +657,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, [execCmd]);
 
-  const callState = activeCall?.status || 'IDLE';
-  const sc = STATES[callState as keyof typeof STATES] || STATES.IDLE;
+  const callState = activeCall?.status || (user ? 'IDLE' : 'LOCKED');
+  const sc = user ? (STATES[callState as keyof typeof STATES] || STATES.IDLE) : { label: 'AGENT_SIGNON', msg: 'SYSTEM_LOCKED: TYPE LOGIN <7-DIGIT-ACCESS-CODE> TO START SESSION.', color: 'sv-WRAP' };
   const effectiveScripts = { ...SCRIPTS, ...dbScripts };
   const script = effectiveScripts[callState as keyof typeof effectiveScripts] || effectiveScripts.IDLE;
   
@@ -488,6 +673,19 @@ export default function App() {
   const dbOpts = (script as any).options || [];
   const hardcodedOpts = STATE_OPTIONS[callState as keyof typeof STATE_OPTIONS] || [];
   const opts = menuMode === 'PHONE' ? phoneOptions : (dbOpts.length > 0 ? dbOpts : hardcodedOpts);
+
+  const logout = () => {
+    localStorage.removeItem('agent_session');
+    setUser(null);
+    setAgents([]);
+    setCalls([]);
+    setActiveCallSid(null);
+    if (device) {
+      device.destroy();
+      setDevice(null);
+    }
+    setTwilioCall(null);
+  };
 
   return (
     <div className="terminal font-mono">
@@ -517,13 +715,19 @@ export default function App() {
             <span className="queue-label">QUEUED:</span>
             <span className={`queue-val ${queuedCount > 0 ? 'ringing' : ''}`}>{queuedCount}</span>
           </div>
-          <span className="agent-tag">{mode}: {AGENT_ID}</span>
+          <div className="flex items-center gap-2 px-3 border-x border-[#333]">
+            <span className="text-[10px] text-gray-500">STATUS:</span>
+            <span className={`text-[10px] font-bold ${agentStatus === 'available' ? 'text-green-500' : 'text-red-500'}`}>
+              {(user ? agentStatus : 'LOCKED').toUpperCase()}
+            </span>
+          </div>
+          <span className="agent-tag" onClick={logout} style={{ cursor: 'pointer' }} title="Click to Logout">{user ? `${mode}: ${AGENT_ID}` : 'UNAUTHORIZED'}</span>
           {new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })} ICT
         </div>
       </div>
 
       <div className="main">
-        {inboundCall && (
+        {inboundCall && !isAccepting && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 pointer-events-none">
             <div className="bg-white text-black p-8 border-[12px] border-double border-black animate-pulse flex flex-col items-center">
               <div className="text-sm font-bold tracking-[0.3em] mb-2">SIGNAL_DETECTED</div>
@@ -938,6 +1142,7 @@ export default function App() {
         <div className="input-container">
           <input
             ref={inputRef}
+            autoFocus
             className="cmd-input"
             value={cmd}
             onChange={e => setCmd(e.target.value)}
