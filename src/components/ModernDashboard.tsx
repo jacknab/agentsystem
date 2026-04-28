@@ -282,6 +282,14 @@ export default function ModernDashboard({
                 className="pl-10 pr-4 py-2 bg-slate-100 border-none rounded-full text-sm focus:ring-2 focus:ring-blue-500 w-64 transition-all"
               />
             </div>
+            <div className="h-8 w-[1px] bg-slate-200 mx-2" />
+            <button 
+              onClick={() => setMode('AGENT')}
+              className="flex items-center gap-2 px-4 py-2 text-slate-600 hover:text-blue-600 font-bold text-xs uppercase tracking-widest transition-colors border border-slate-200 rounded-lg bg-white shadow-sm"
+            >
+              <Monitor size={14} />
+              Exit to Terminal
+            </button>
             <button className="p-2 text-slate-400 hover:text-slate-600 transition-colors">
               <Settings size={20} />
             </button>
