@@ -157,6 +157,7 @@ export default function App() {
   const [menuMode, setMenuMode] = useState<'MAIN' | 'PHONE'>('MAIN');
   const [isAccepting, setIsAccepting] = useState(false);
   const [agentStatus, setAgentStatus] = useState<'available' | 'busy' | 'dnd'>('busy');
+  const [isRingingTimedOut, setIsRingingTimedOut] = useState(false);
 
   const [device, setDevice] = useState<Device | null>(null);
   const [twilioCall, setTwilioCall] = useState<Call | null>(null);
@@ -292,10 +293,26 @@ export default function App() {
   const [notify, setNotify] = useState<{ id: number; msg: string; type: string } | null>(null);
 
   const activeCall = calls.find(c => c.callSid === activeCallSid) || calls.find(c => c.assignedAgent === AGENT_ID);
-  const inboundCall = calls.find(c => 
+  const inboundCall = user && calls.find(c => 
     (c.status === 'INBOUND' || c.status === 'QUEUED') && 
     (c.assignedAgent === AGENT_ID || !c.assignedAgent)
   );
+
+  // Auto-dismiss popup after 20 seconds
+  useEffect(() => {
+    if (inboundCall) {
+      setIsRingingTimedOut(false);
+      const timer = setTimeout(() => {
+        setIsRingingTimedOut(true);
+      }, 20000);
+      return () => clearTimeout(timer);
+    } else {
+      setIsRingingTimedOut(false);
+    }
+  }, [inboundCall?.callSid]);
+
+  const isAgentOnActiveCall = activeCall && ['ACTIVE', 'HOLD', 'TRANSFER', 'BRIEFING'].includes(activeCall.status);
+
   const queuedCount = calls.filter(c => c.status === 'INBOUND' || c.status === 'QUEUED').length;
 
   const showNotify = useCallback((msg: string, type = 'info') => {
@@ -582,6 +599,9 @@ export default function App() {
         if (activeCallSid) fetch("/twilio/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid: activeCallSid }) });
       } else if (input === "X" || input === "TRANSFER") {
         if (activeCallSid) fetch("/twilio/transfer/initiate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid: activeCallSid, fromAgent: AGENT_ID, toAgent: "agent-002" }) });
+      } else if (input === "Y" || input === "READY") {
+        setAgentStatus('available');
+        showNotify('AGENT STATUS: READY', 'ok');
       } else if (input === "B" || input === "BILLING") {
         showNotify('Switching to Billing Script', 'warn');
       } else if (input === "T" || input === "TECH") {
@@ -717,6 +737,7 @@ export default function App() {
     { key: 'H', label: 'Hold Call' },
     { key: 'R', label: 'Resume Call' },
     { key: 'X', label: 'Transfer Call' },
+    { key: 'Y', label: 'Ready for Work' },
     { key: 'B', label: 'Billing Dept' },
     { key: 'T', label: 'Tech Dept' },
   ];
@@ -778,7 +799,7 @@ export default function App() {
       </div>
 
       <div className="main">
-        {inboundCall && !isAccepting && (
+        {user && inboundCall && !isAccepting && !isAgentOnActiveCall && !isRingingTimedOut && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 pointer-events-none">
             <div className="bg-white text-black p-8 border-[12px] border-double border-black animate-pulse flex flex-col items-center">
               <div className="text-sm font-bold tracking-[0.3em] mb-2">SIGNAL_DETECTED</div>
