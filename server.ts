@@ -179,34 +179,34 @@ app.get("/api/auth/token", (req, res) => {
     return res.status(500).json({ error: "Twilio credentials missing on server" });
   }
 
-    try {
+  try {
     const AccessToken = twilio.jwt.AccessToken;
     const VoiceGrant = AccessToken.VoiceGrant;
 
-    const token = new AccessToken(
-      process.env.TWILIO_ACCOUNT_SID!,
-      process.env.TWILIO_VOICE_API_KEY!,
-      process.env.TWILIO_VOICE_API_SECRET!,
-      { 
-        identity: identity,
-        ttl: 3600
-      }
-    );
+    // Use strict trimming to prevent hidden whitespace/newlines from breaking signatures
+    const accountSid = process.env.TWILIO_ACCOUNT_SID.trim();
+    const apiKey = process.env.TWILIO_VOICE_API_KEY.trim();
+    const apiSecret = process.env.TWILIO_VOICE_API_SECRET.trim();
+    const appSid = process.env.TWILIO_TWIML_APP_SID?.trim();
 
-    // Re-ensure identity
-    token.identity = identity;
+    // Diagnostic check: Account SID should start with AC, API Keys with SK
+    if (!accountSid.startsWith('AC')) console.warn(`[AUTH] Warning: Account SID "${accountSid.substring(0,4)}..." may be incorrect (Expected starting with 'AC')`);
+    if (!apiKey.startsWith('SK')) console.warn(`[AUTH] Warning: API Key "${apiKey.substring(0,4)}..." may be incorrect (Expected starting with 'SK')`);
+
+    const token = new AccessToken(accountSid, apiKey, apiSecret, {
+      identity: identity,
+      ttl: 3600
+    });
 
     const voiceGrant = new VoiceGrant({
       incomingAllow: true,
-      outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID?.trim(),
+      outgoingApplicationSid: appSid,
     });
 
     token.addGrant(voiceGrant);
     const jwt = token.toJwt();
     
-    // Detailed logging of the payload to help debug 53000 errors
-    console.log(`[AUTH] Token for ${identity} generated. Grants:`, voiceGrant);
-    
+    console.log(`[AUTH] Token for ${identity} generated successfully.`);
     res.json({ token: jwt });
   } catch (err) {
     console.error("[AUTH] Token generation failed:", err);
@@ -353,17 +353,17 @@ app.post("/twilio/inbound", (req, res) => {
     const statusCallback = `${baseUrl}/twilio/status`;
 
     if (availableAgent) {
-      twiml.say("Connecting you to an agent.");
+      console.log(`[TWILIO] Routing call ${CallSid} to available agent ${availableAgent.id}`);
       assignCallToAgent(CallSid, availableAgent.id);
       
       const dial = twiml.dial({
-        timeout: 20, // Reduced slightly for faster rollover
+        timeout: 20,
         callerId: From,
       });
       dial.client(availableAgent.id);
       
-      // If dial fails or times out, redirect to self to hit the "busy" path
-      twiml.say("Agent did not answer. Re-routing to queue.");
+      // Fallback if client dial fails (e.g. offline)
+      twiml.say("The agent is currently establishing a connection. Please hold.");
       twiml.redirect(`${baseUrl}/twilio/inbound`);
     } else {
       twiml.say("All agents are currently busy. Please stay on the line.");

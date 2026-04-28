@@ -215,11 +215,20 @@ export default function App() {
 
         newDevice.on('unregistered', () => {
           showNotify('COMM-LINK LOST', 'warn');
-          setTimeout(() => {
+          // Try to get a fresh token and re-register
+          setTimeout(async () => {
             if (activeDevice && activeDevice.state === 'unregistered') {
-              activeDevice.register().catch(e => console.error('Retry failed', e));
+              console.log('[VOIP] Fetching fresh token for recovery...');
+              try {
+                const res = await fetch(`/api/auth/token?identity=${userId}`);
+                const { token } = await res.json();
+                await activeDevice.updateToken(token);
+                await activeDevice.register();
+              } catch (e) {
+                console.error('[VOIP] Token refresh failed', e);
+              }
             }
-          }, 3000);
+          }, 5000);
         });
 
         newDevice.on('error', (error) => {
