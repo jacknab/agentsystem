@@ -66,13 +66,38 @@ export class Database {
       )
     `);
 
-    // Scripts Table
+    // Scripts Table (Global/State-based)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS scripts (
         state TEXT PRIMARY KEY,
         read TEXT,
         guide TEXT,
         options TEXT DEFAULT '[]'
+      )
+    `);
+
+    // Campaigns Table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        description TEXT,
+        status TEXT DEFAULT 'active',
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Campaign Scripts (The specific script blocks/records used in a campaign)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS campaign_scripts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaignId INTEGER,
+        title TEXT,
+        read TEXT,
+        guide TEXT,
+        options TEXT DEFAULT '[]',
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(campaignId) REFERENCES campaigns(id)
       )
     `);
 
@@ -208,6 +233,49 @@ export class Database {
   updateUserStatus(id: string, status: string) {
     const stmt = this.db.prepare("UPDATE users SET status = ? WHERE id = ?");
     return stmt.run(status, id);
+  }
+
+  // --- Campaign Management ---
+  getCampaigns() {
+    return this.db.prepare("SELECT * FROM campaigns ORDER BY createdAt DESC").all();
+  }
+
+  createCampaign(name: string, description: string) {
+    const stmt = this.db.prepare("INSERT INTO campaigns (name, description) VALUES (?, ?)");
+    return stmt.run(name, description);
+  }
+
+  deleteCampaign(id: number) {
+    this.db.prepare("DELETE FROM campaign_scripts WHERE campaignId = ?").run(id);
+    return this.db.prepare("DELETE FROM campaigns WHERE id = ?").run(id);
+  }
+
+  // --- Campaign Script Management ---
+  getCampaignScripts(campaignId?: number) {
+    if (campaignId) {
+      return this.db.prepare("SELECT * FROM campaign_scripts WHERE campaignId = ? ORDER BY id ASC").all(campaignId);
+    }
+    return this.db.prepare("SELECT * FROM campaign_scripts ORDER BY id ASC").all();
+  }
+
+  createCampaignScript(campaignId: number, title: string, read: string, guide: string, options: any[] = []) {
+    const stmt = this.db.prepare(`
+      INSERT INTO campaign_scripts (campaignId, title, read, guide, options)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    return stmt.run(campaignId, title, read, guide, JSON.stringify(options));
+  }
+
+  updateCampaignScript(id: number, title: string, read: string, guide: string, options: any[] = []) {
+    const stmt = this.db.prepare(`
+      UPDATE campaign_scripts SET title = ?, read = ?, guide = ?, options = ?
+      WHERE id = ?
+    `);
+    return stmt.run(title, read, guide, JSON.stringify(options), id);
+  }
+
+  deleteCampaignScript(id: number) {
+    return this.db.prepare("DELETE FROM campaign_scripts WHERE id = ?").run(id);
   }
 
   getAvailableAgent() {

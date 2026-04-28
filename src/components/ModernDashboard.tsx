@@ -12,7 +12,11 @@ import {
   Plus,
   Play,
   Monitor,
-  HeartPulse
+  HeartPulse,
+  FileText,
+  Layers,
+  Edit,
+  Trash
 } from "lucide-react";
 import { 
   LineChart, 
@@ -53,7 +57,7 @@ export default function ModernDashboard({
   fetchAdminData,
   showNotify
 }: ModernDashboardProps) {
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'AGENTS' | 'CALLS' | 'SCRIPTS' | 'LOGS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'AGENTS' | 'CALLS' | 'CAMPAIGNS' | 'LOGS'>('OVERVIEW');
 
   const stats = [
     { label: "Active Calls", value: calls.filter(c => c.status === 'ACTIVE').length, icon: Phone, color: "text-blue-500" },
@@ -73,6 +77,106 @@ export default function ModernDashboard({
 
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [newAgent, setNewAgent] = useState({ id: '', name: '', pin: '', loginCode: '' });
+
+  // Campaign States
+  const [campaigns, setCampaigns] = useState<any[]>([]);
+  const [selectedCampaign, setSelectedCampaign] = useState<any>(null);
+  const [campaignScripts, setCampaignScripts] = useState<any[]>([]);
+  const [showAddCampaign, setShowAddCampaign] = useState(false);
+  const [showAddScript, setShowAddScript] = useState(false);
+  const [newCampaign, setNewCampaign] = useState({ name: '', description: '' });
+  const [newScript, setNewScript] = useState({ title: '', read: '', guide: '' });
+
+  const fetchCampaigns = async () => {
+    try {
+      const res = await fetch("/api/admin/campaigns");
+      const data = await res.json();
+      setCampaigns(data);
+    } catch (err) {
+      console.error("Failed to fetch campaigns", err);
+    }
+  };
+
+  const fetchScripts = async (campaignId: number) => {
+    try {
+      const res = await fetch(`/api/admin/campaign-scripts?campaignId=${campaignId}`);
+      const data = await res.json();
+      setCampaignScripts(data);
+    } catch (err) {
+      console.error("Failed to fetch scripts", err);
+    }
+  };
+
+  const handleCreateCampaign = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch("/api/admin/campaigns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newCampaign)
+      });
+      if (res.ok) {
+        showNotify(`Campaign ${newCampaign.name} created`, 'ok');
+        setShowAddCampaign(false);
+        setNewCampaign({ name: '', description: '' });
+        fetchCampaigns();
+      }
+    } catch (err) {
+      showNotify("Failed to create campaign", "err");
+    }
+  };
+
+  const handleCreateScript = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCampaign) return;
+    try {
+      const res = await fetch("/api/admin/campaign-scripts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...newScript, campaignId: selectedCampaign.id })
+      });
+      if (res.ok) {
+        showNotify(`Script record created`, 'ok');
+        setShowAddScript(false);
+        setNewScript({ title: '', read: '', guide: '' });
+        fetchScripts(selectedCampaign.id);
+      }
+    } catch (err) {
+      showNotify("Failed to create script", "err");
+    }
+  };
+
+  const deleteCampaign = async (id: number) => {
+    if (!window.confirm("Delete campaign and all its scripts?")) return;
+    try {
+      const res = await fetch(`/api/admin/campaigns/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        showNotify("Campaign deleted", "warn");
+        fetchCampaigns();
+        setSelectedCampaign(null);
+      }
+    } catch (err) {
+      showNotify("Failed to delete campaign", "err");
+    }
+  };
+
+  const deleteScript = async (id: number) => {
+    try {
+      const res = await fetch(`/api/admin/campaign-scripts/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        showNotify("Script deleted", "warn");
+        if (selectedCampaign) fetchScripts(selectedCampaign.id);
+      }
+    } catch (err) {
+      showNotify("Failed to delete script", "err");
+    }
+  };
+
+  React.useEffect(() => {
+    if (activeTab === 'CAMPAIGNS') {
+      fetchCampaigns();
+    }
+  }, [activeTab]);
 
   const handleCreateAgent = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -221,6 +325,116 @@ export default function ModernDashboard({
         )}
       </AnimatePresence>
 
+      <AnimatePresence>
+        {showAddCampaign && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="font-bold text-slate-900 tracking-tight">Create New Campaign</h3>
+                <button onClick={() => setShowAddCampaign(false)} className="text-slate-400 hover:text-slate-600">&times;</button>
+              </div>
+              <form onSubmit={handleCreateCampaign} className="p-8 space-y-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 tracking-wider">Campaign Name</label>
+                    <input 
+                      required
+                      className="w-full px-4 py-3 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={newCampaign.name}
+                      onChange={e => setNewCampaign({...newCampaign, name: e.target.value})}
+                      placeholder="e.g. Summer 2024 Outreach"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 tracking-wider">Description</label>
+                    <textarea 
+                      className="w-full px-4 py-3 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all h-24"
+                      value={newCampaign.description}
+                      onChange={e => setNewCampaign({...newCampaign, description: e.target.value})}
+                      placeholder="Goal of this campaign..."
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-4">
+                  <button type="button" onClick={() => setShowAddCampaign(false)} className="flex-1 px-4 py-3 bg-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-300">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-100 transition-all">Create Campaign</button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showAddScript && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="font-bold text-slate-900 tracking-tight">Add Script Block to {selectedCampaign?.name}</h3>
+                <button onClick={() => setShowAddScript(false)} className="text-slate-400 hover:text-slate-600">&times;</button>
+              </div>
+              <form onSubmit={handleCreateScript} className="p-8 space-y-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 tracking-wider">Script Title / Page Name</label>
+                    <input 
+                      required
+                      className="w-full px-4 py-3 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={newScript.title}
+                      onChange={e => setNewScript({...newScript, title: e.target.value})}
+                      placeholder="e.g. Introduction"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 tracking-wider">Read Aloud Text</label>
+                      <textarea 
+                        required
+                        className="w-full px-4 py-3 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all h-32"
+                        value={newScript.read}
+                        onChange={e => setNewScript({...newScript, read: e.target.value})}
+                        placeholder="What the agent should say..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 tracking-wider">Internal Guide / Notes</label>
+                      <textarea 
+                        className="w-full px-4 py-3 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all h-32"
+                        value={newScript.guide}
+                        onChange={e => setNewScript({...newScript, guide: e.target.value})}
+                        placeholder="Tips for the agent..."
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-4">
+                  <button type="button" onClick={() => setShowAddScript(false)} className="px-4 py-3 bg-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-300">Cancel</button>
+                  <button type="submit" className="flex-1 px-4 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-100 transition-all">Submit Script Record</button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <aside className="w-64 bg-white border-r border-slate-200 flex flex-col">
         <div className="p-6 flex items-center gap-3 border-b border-slate-100">
           <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">C</div>
@@ -245,6 +459,12 @@ export default function ModernDashboard({
             label="Live Queue" 
             active={activeTab === 'CALLS'} 
             onClick={() => setActiveTab('CALLS')} 
+          />
+          <NavItem 
+            icon={Layers} 
+            label="Campaigns" 
+            active={activeTab === 'CAMPAIGNS'} 
+            onClick={() => setActiveTab('CAMPAIGNS')} 
           />
           <NavItem 
             icon={ShieldCheck} 
@@ -523,6 +743,124 @@ export default function ModernDashboard({
                     </div>
                   ))
                 )}
+              </motion.div>
+            )}
+
+            {activeTab === 'CAMPAIGNS' && (
+              <motion.div 
+                key="campaigns"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="grid grid-cols-12 gap-8"
+              >
+                {/* Campaigns List */}
+                <div className="col-span-4 space-y-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <h3 className="font-bold text-slate-900 text-xs uppercase tracking-widest">Active Campaigns</h3>
+                    <button 
+                      onClick={() => setShowAddCampaign(true)}
+                      className="p-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      <Plus size={16} />
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {campaigns.map((c) => (
+                      <div 
+                        key={c.id} 
+                        onClick={() => {
+                          setSelectedCampaign(c);
+                          fetchScripts(c.id);
+                        }}
+                        className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                          selectedCampaign?.id === c.id 
+                            ? 'bg-blue-50 border-blue-200 shadow-sm' 
+                            : 'bg-white border-slate-200 hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start mb-1">
+                          <span className="font-bold text-sm text-slate-900">{c.name}</span>
+                          <span className="text-[10px] font-mono text-slate-400">#CP-{c.id}</span>
+                        </div>
+                        <p className="text-xs text-slate-500 line-clamp-1 mb-3">{c.description}</p>
+                        <div className="flex justify-between items-center">
+                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{new Date(c.createdAt).toLocaleDateString()}</span>
+                           <button onClick={(e) => { e.stopPropagation(); deleteCampaign(c.id); }} className="text-slate-400 hover:text-red-500">
+                             <Trash size={14} />
+                           </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Script Builder Area */}
+                <div className="col-span-8">
+                  {selectedCampaign ? (
+                    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm flex flex-col h-full min-h-[600px]">
+                      <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                        <div>
+                          <h3 className="font-bold text-slate-900">{selectedCampaign.name}</h3>
+                          <p className="text-xs text-slate-500 italic">Manage script sequence and records</p>
+                        </div>
+                        <button 
+                          onClick={() => setShowAddScript(true)}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 transition-colors shadow-lg shadow-blue-100"
+                        >
+                          <Plus size={16} />
+                          New Script Block
+                        </button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                        {campaignScripts.length === 0 ? (
+                          <div className="flex flex-col items-center justify-center p-20 text-slate-300">
+                            <FileText size={48} className="opacity-20 mb-4" />
+                            <p className="text-sm font-medium">No scripts built for this campaign yet.</p>
+                          </div>
+                        ) : (
+                          campaignScripts.map((s) => (
+                            <div key={s.id} className="p-6 rounded-2xl border border-slate-100 bg-slate-50/30 group relative">
+                              <div className="flex justify-between items-start mb-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center font-bold text-blue-600 text-xs shadow-sm">
+                                    {s.id}
+                                  </div>
+                                  <div>
+                                    <h4 className="font-bold text-slate-900 text-sm">{s.title}</h4>
+                                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">RECORD #{s.id}</span>
+                                  </div>
+                                </div>
+                                <div className="flex gap-2">
+                                   <button className="p-2 text-slate-400 hover:text-blue-600 bg-white rounded-lg border border-slate-100 shadow-sm transition-all">
+                                     <Edit size={14} />
+                                   </button>
+                                   <button onClick={() => deleteScript(s.id)} className="p-2 text-slate-400 hover:text-red-600 bg-white rounded-lg border border-slate-100 shadow-sm transition-all">
+                                     <Trash size={14} />
+                                   </button>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-6">
+                                <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+                                   <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 border-b border-slate-50 pb-1">Read Text</div>
+                                   <p className="text-xs text-slate-600 leading-relaxed italic">"{s.read}"</p>
+                                </div>
+                                <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+                                   <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 border-b border-slate-50 pb-1">Internal Guide</div>
+                                   <p className="text-xs text-slate-500 leading-relaxed font-medium">{s.guide}</p>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center p-40 bg-white rounded-2xl border border-dashed border-slate-300 text-slate-300 space-y-4">
+                      <Layers size={64} className="opacity-10" />
+                      <p className="text-lg font-medium">Select a campaign to begin building scripts.</p>
+                    </div>
+                  )}
+                </div>
               </motion.div>
             )}
 

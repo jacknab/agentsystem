@@ -57,7 +57,7 @@ interface CallState {
   holdStartTime?: number;
 }
 
-// In-memory active calls (authoritative state)
+  // In-memory active calls (authoritative state)
 const activeCalls = new Map<string, CallState>();
 
 // --- Admin & Stats Endpoints ---
@@ -103,7 +103,121 @@ app.post("/api/admin/scripts", (req, res) => {
   res.json({ success: true });
 });
 
-// --- Silent Join (QA Monitor) & Barge ---
+// --- Campaigns API ---
+app.get("/api/admin/campaigns", (req, res) => {
+  res.json(db.getCampaigns());
+});
+
+app.post("/api/admin/campaigns", (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.status(400).json({ error: "Missing campaign name" });
+  db.createCampaign(name, description || "");
+  res.json({ success: true });
+});
+
+app.delete("/api/admin/campaigns/:id", (req, res) => {
+  db.deleteCampaign(parseInt(req.params.id));
+  res.json({ success: true });
+});
+
+// --- Campaign Scripts API ---
+app.get("/api/admin/campaign-scripts", (req, res) => {
+  const campaignId = req.query.campaignId ? parseInt(req.query.campaignId as string) : undefined;
+  res.json(db.getCampaignScripts(campaignId));
+});
+
+app.post("/api/admin/campaign-scripts", (req, res) => {
+  const { campaignId, title, read, guide, options } = req.body;
+  if (!campaignId) return res.status(400).json({ error: "Missing campaign ID" });
+  db.createCampaignScript(campaignId, title, read, guide, options || []);
+  res.json({ success: true });
+});
+
+app.put("/api/admin/campaign-scripts/:id", (req, res) => {
+  const { title, read, guide, options } = req.body;
+  db.updateCampaignScript(parseInt(req.params.id), title, read, guide, options || []);
+  res.json({ success: true });
+});
+
+app.delete("/api/admin/campaign-scripts/:id", (req, res) => {
+  db.deleteCampaignScript(parseInt(req.params.id));
+  res.json({ success: true });
+});
+
+// --- Outbound Dialing ---
+app.post("/api/call/dial", async (req, res) => {
+  const { number, agentId } = req.body;
+  if (!number || !agentId) return res.status(400).json({ error: "Missing number or agentId" });
+
+  const formattedNumber = number.startsWith('+') ? number : `+1${number.replace(/\D/g, '')}`;
+  const callSid = `out_${Date.now()}`; // Pseudo SID for tracking until Twilio gives us real one
+
+  console.log(`[OUTBOUND] Agent ${agentId} is dialing ${formattedNumber}`);
+
+  try {
+    // 1. Create a placeholder call state
+    const callState: CallState = {
+      callSid: callSid,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
+      to: formattedNumber,
+      status: 'BRIDGING',
+      assignedAgent: agentId,
+      timestamp: Date.now()
+    };
+    activeCalls.set(callSid, callState);
+
+    // 2. Fetch Base URL for TwiML callbacks
+    let baseUrl = process.env.APP_URL || "";
+    if (!baseUrl || baseUrl.includes("-dev-")) {
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
+      const hostStr = Array.isArray(host) ? host[0] : host;
+      if (hostStr && hostStr.includes("-dev-")) {
+        baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
+      } else if (hostStr) {
+        baseUrl = `${protocol}://${hostStr}`;
+      }
+    }
+
+    // 3. Dial the Customer first, then move them to conference
+    const customerCall = await twilioClient.calls.create({
+      to: formattedNumber,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
+      url: `${baseUrl}/twilio/outbound-join?confName=conf_${callSid}`
+    });
+
+    // Update the real SID
+    activeCalls.delete(callSid);
+    callState.callSid = customerCall.sid;
+    activeCalls.set(customerCall.sid, callState);
+
+    // 4. Dial the Agent
+    await twilioClient.calls.create({
+      to: `client:${agentId}`,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
+      url: `${baseUrl}/twilio/agent-join?confName=conf_${customerCall.sid}`
+    });
+
+    res.json({ success: true, callSid: customerCall.sid });
+  } catch (err) {
+    console.error('[OUTBOUND] Dial failed:', err);
+    res.status(500).json({ error: "Dial failed" });
+  }
+});
+
+// Endpoint for customer side of outbound call
+app.post("/twilio/outbound-join", (req, res) => {
+  const { confName } = req.query;
+  const twiml = new twilio.twiml.VoiceResponse();
+  const dial = twiml.dial();
+  dial.conference({
+    startConferenceOnEnter: true,
+    endConferenceOnExit: true,
+    waitUrl: 'http://twimlets.com/holdmusic?Queue=standard'
+  }, confName as string);
+  res.type('text/xml');
+  res.send(twiml.toString());
+});
 app.post("/twilio/monitor", async (req, res) => {
   const { callSid, managerId } = req.body;
   const call = activeCalls.get(callSid);
@@ -434,34 +548,48 @@ app.post("/twilio/inbound", (req, res) => {
 });
 
 app.post("/twilio/status", (req, res) => {
-  const { CallSid, ConferenceSid, StatusCallbackEvent, ParticipantSid } = req.body;
-  console.log(`Status update: ${StatusCallbackEvent} for ${CallSid} in ${ConferenceSid}`);
+  const { CallSid, ConferenceSid, StatusCallbackEvent, ParticipantSid, FriendlyName } = req.body;
+  
+  let call = activeCalls.get(CallSid);
 
-  const call = activeCalls.get(CallSid);
+  // If we can't find by CallSid, it might be the Agent joining (ParticipantSid) 
+  // or a conference callback that identifies which call this is via FriendlyName
+  if (!call && FriendlyName && FriendlyName.startsWith('conf_')) {
+    const originalCallSid = FriendlyName.replace('conf_', '');
+    call = activeCalls.get(originalCallSid);
+  }
+
   if (call) {
     if (StatusCallbackEvent === "participant-join") {
+      console.log(`[TWILIO] Participant Join: ${ParticipantSid} in ${FriendlyName} (Call status: ${call.status})`);
       // If it's the customer, they are now "QUEUED" in the conference
       if (!call.assignedAgent) {
         call.status = "QUEUED";
         call.conferenceSid = ConferenceSid;
-        db.updateCallStatus(CallSid, "QUEUED");
+        db.updateCallStatus(call.callSid, "QUEUED");
         io.emit("call.queued", call);
-      } else if (call.status === "BRIDGING" && ParticipantSid.startsWith('CA')) {
-        // Assume agent just joined - promote to ACTIVE
-        console.log(`[TWILIO] Agent joined conference for ${CallSid}. Setting ACTIVE.`);
+      } else if (call.status === "BRIDGING") {
+        // Agent or second party joined - promote to ACTIVE
+        console.log(`[TWILIO] Bridge completed for ${call.callSid}. Setting ACTIVE.`);
         call.status = "ACTIVE";
-        db.updateCallStatus(CallSid, "ACTIVE");
+        db.updateCallStatus(call.callSid, "ACTIVE");
         io.emit("call.active", call);
       }
     } else if (StatusCallbackEvent === "participant-leave") {
-      // Handle cleanup if needed
+      console.log(`[TWILIO] Participant Left: ${ParticipantSid} from ${FriendlyName}`);
+      if (ParticipantSid === call.callSid) {
+        // Customer left
+        call.status = "WRAP";
+        db.updateCallStatus(call.callSid, "WRAP");
+        io.emit("call.ended", { callSid: call.callSid });
+      }
     } else if (req.body.CallStatus === "completed" || req.body.CallStatus === "canceled") {
       if (call.status === "INBOUND" || call.status === "QUEUED") {
-        db.markMissed(CallSid);
+        db.markMissed(call.callSid);
       }
-      activeCalls.delete(CallSid);
-      db.updateCallStatus(CallSid, "ENDED");
-      io.emit("call.ended", { callSid: CallSid });
+      activeCalls.delete(call.callSid);
+      db.updateCallStatus(call.callSid, "ENDED");
+      io.emit("call.ended", { callSid: call.callSid });
     }
   }
 
@@ -510,14 +638,23 @@ app.post("/api/call/bridge", async (req, res) => {
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
       const protocol = req.headers['x-forwarded-proto'] || 'https';
-      const host = req.headers['host'] || "";
-      baseUrl = `${protocol}://${host}`.includes("-dev-") ? `${protocol}://${host}`.replace("-dev-", "-pre-") : `${protocol}://${host}`;
+      const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
+      const hostStr = Array.isArray(host) ? host[0] : host;
+      
+      if (hostStr && hostStr.includes("-dev-")) {
+        baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
+      } else if (hostStr) {
+        baseUrl = `${protocol}://${hostStr}`;
+      }
     }
+
+    const bridgeUrl = `${baseUrl}/twilio/agent-join?confName=conf_${callSid}`;
+    console.log(`[BRIDGE] Dialing agent ${agentId} with TwiML URL: ${bridgeUrl}`);
 
     await twilioClient.calls.create({
       to: `client:${agentId}`,
       from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
-      url: `${baseUrl}/twilio/agent-join?confName=conf_${callSid}`
+      url: bridgeUrl
     });
 
     io.emit("call.assigned", call);
@@ -546,6 +683,7 @@ app.post("/api/call/bridge", async (req, res) => {
 // Endpoint to provide TwiML for the Agent joining a conference
 app.post("/twilio/agent-join", (req, res) => {
   const { confName, muted } = req.query;
+  console.log(`[TWILIO] Agent join requested for conference: ${confName} (muted=${muted})`);
   const twiml = new twilio.twiml.VoiceResponse();
   const dial = twiml.dial();
   dial.conference({

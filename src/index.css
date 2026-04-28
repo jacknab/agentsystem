@@ -368,6 +368,7 @@
 .sv-INBOUND { color: #f0a030; animation: flick 0.6s infinite; }
 .sv-QUEUED { color: #f0a030; animation: flick 0.8s infinite; }
 .sv-LOOKUP { color: #4f8ef7; animation: flick 0.5s infinite; }
+.sv-CONNECTING { color: #f0a030; animation: flick 1.0s infinite; }
 .sv-ACTIVE { color: #5cb85c; }
 .sv-RETENTION { color: #e04040; }
 .sv-BILLING { color: #f0a030; }

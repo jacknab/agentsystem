@@ -32,7 +32,7 @@ const STATES = {
   BRIEFING: { label: 'BRIEFING', msg: 'Internal briefing phase for warm transfer.', color: 'sv-TRANSFER' },
   TRANSFER: { label: 'TRANSFERRING', msg: 'Call being transferred to Tier 2 support.', color: 'sv-TRANSFER' },
   WRAP: { label: 'WRAP-UP', msg: 'Call ended. Complete notes and disposition within 3 min.', color: 'sv-WRAP' },
-  BRIDGING: { label: 'CONNECTING...', msg: 'Linking your audio to the customer. Please wait.', color: 'sv-IDLE' },
+  BRIDGING: { label: 'CONNECTING...', msg: 'Linking your audio to the customer. Please wait.', color: 'sv-CONNECTING' },
 };
 
 const SCRIPTS = {
@@ -165,64 +165,69 @@ export default function App() {
 
   const [device, setDevice] = useState<Device | null>(null);
   const [linkStatus, setLinkStatus] = useState<'OFFLINE' | 'CONNECTING' | 'OK' | 'ERROR'>('OFFLINE');
+  const [linkMsg, setLinkMsg] = useState('INITIALIZING');
   const [twilioCall, setTwilioCall] = useState<Call | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!user) return;
+    console.log('[VOIP] Effect triggered. User:', user?.id);
+    if (!user) {
+      setLinkStatus('OFFLINE');
+      return;
+    }
 
     let activeDevice: Device | null = null;
 
     const initTwilio = async () => {
-      console.log('[VOIP] Starting Twilio initialization...');
-      // showNotify('INITIATING VOIP LINK...', 'info'); // Maybe too noisy, but useful for debug
+      setLinkStatus('CONNECTING');
+      setLinkMsg('FETCHING TOKEN');
+      console.log('[VOIP] Starting Twilio initialization for identity:', user.id);
       try {
         const res = await fetch(`/api/auth/token?identity=${user.id}`);
         if (!res.ok) {
           const errData = await res.json().catch(() => ({ error: 'Unknown server error' }));
+          setLinkStatus('ERROR');
+          setLinkMsg('TOKEN FAILED');
           showNotify(`TOKEN ERROR: ${errData.error || res.statusText}`, 'err');
           return;
         }
         const { token } = await res.json();
+        setLinkMsg('SDK INIT');
         
         if (!token) {
+          setLinkStatus('ERROR');
+          setLinkMsg('EMPTY TOKEN');
           showNotify('ERROR: Received empty token from server', 'err');
           return;
-        }
-
-        // Check for WebRTC support
-        if (!window.isSecureContext) {
-          showNotify('VOIP ERROR: Insecure context. HTTPS is required.', 'err');
-        }
-        
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          showNotify('VOIP ERROR: Microphone access not supported or blocked.', 'err');
         }
 
         const newDevice = new Device(token, {
           logLevel: 'debug',
           codecPreferences: [Call.Codec.Opus, Call.Codec.PCMU],
-          // Removing explicit edge to let Twilio auto-discover best path
         });
 
         activeDevice = newDevice;
+        setDevice(newDevice);
 
         // Attach listeners BEFORE registering
         newDevice.on('registered', () => {
           showNotify('COMM-LINK ESTABLISHED', 'ok');
           console.log('[VOIP] Device registered successfully');
           setLinkStatus('OK');
+          setLinkMsg('ONLINE');
         });
 
         newDevice.on('registering', () => {
-          console.log('[VOIP] Registering device...');
+          console.log('[VOIP] Device registering...');
           setLinkStatus('CONNECTING');
+          setLinkMsg('REGISTERING');
         });
 
         newDevice.on('unregistered', () => {
           showNotify('COMM-LINK LOST', 'warn');
           setLinkStatus('OFFLINE');
+          setLinkMsg('UNREGISTERED');
           // Try to get a fresh token and re-register
           setTimeout(async () => {
             if (activeDevice && activeDevice.state === 'unregistered') {
@@ -239,39 +244,31 @@ export default function App() {
           }, 5000);
         });
 
-        // Auto-register
-        await newDevice.register();
-
         newDevice.on('error', (error) => {
           console.error('Twilio Device Error:', error);
           setLinkStatus('ERROR');
+          setLinkMsg(`ERR:${error.code}`);
           let userMsg = `VOIP ERROR (${error.code}): ${error.message}`;
           
-          // Map common Twilio error codes to helpful messages
           if (error.code === 31000) userMsg = 'VOIP ERROR: Identity taken or connection failed';
-          if (error.code === 31005) userMsg = 'VOIP ERROR: Connection to Twilio timed out';
+          if (error.code === 31005) userMsg = 'VOIP ERROR: Connection timed out (Check Firewall/Port 443)';
           if (error.code === 31201) userMsg = 'VOIP ERROR: Invalid token credentials';
           if (error.code === 31202) {
-            userMsg = 'CRITICAL: JWT Signature Validation Failed. Verify Twilio API Secret.';
-            showNotify('SECURITY ERROR: JWT Signature Validation Failed. Check Secret Key.', 'error');
+            userMsg = 'CRITICAL: JWT Signature Failed. Check API Secret.';
+            showNotify('SECURITY ERROR: JWT Signature Validation Failed.', 'error');
           }
           if (error.code === 31208) userMsg = 'VOIP ERROR: Token expired';
-          if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling connection failed (check Secret/Firewall)';
+          if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling failed';
           
-          if (error.code === 31202) {
-            showNotify(userMsg, 'error');
-          } else {
-            showNotify(userMsg, 'warn');
-          }
+          showNotify(userMsg, 'warn');
         });
 
         newDevice.on('incoming', (call) => {
           showNotify('INCOMING VOIP CONNECTION', 'warn');
           setTwilioCall(call);
           
-          // Auto-accept if we were mid-bridge or if we initiated the answer manually
           if (isAcceptingRef.current) {
-            console.log('[VOIP] Auto-accepting incoming call from PBX bridge');
+            console.log('[VOIP] Auto-accepting incoming call');
             call.accept();
             setIsAccepting(false);
           }
@@ -282,9 +279,15 @@ export default function App() {
           });
         });
 
-        setDevice(newDevice);
+        // Finally, register
+        console.log('[VOIP] Calling register()...');
+        setLinkMsg('CALLING REG');
+        await newDevice.register();
+        console.log('[VOIP] register() call completed');
       } catch (err) {
         console.error('Twilio Init failed:', err);
+        setLinkStatus('ERROR');
+        setLinkMsg('INIT FAILED');
         showNotify(`INIT ERROR: ${err instanceof Error ? err.message : 'Internal failed'}`, 'err');
       }
     };
@@ -685,6 +688,29 @@ export default function App() {
       return;
     }
 
+    // Outbound Dial (e.g. D7202436886)
+    if (input.startsWith("D")) {
+      const number = input.substring(1).replace(/\D/g, "");
+      if (number.length >= 10) {
+        showNotify(`DIALING: ${number}...`, "info");
+        fetch("/api/call/dial", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ number, agentId: AGENT_ID })
+        }).then(res => {
+          if (res.ok) {
+            setMenuMode("MAIN");
+          } else {
+            showNotify("DIAL FAILED", "err");
+          }
+        });
+      } else {
+        showNotify("INVALID DIAL: Needs 10 digits", "warn");
+      }
+      setCmd("");
+      return;
+    }
+
     if (menuMode === 'PHONE') {
       if (input === "H" || input === "HOLD") {
         if (activeCallSid) fetch("/twilio/hold", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ callSid: activeCallSid }) });
@@ -712,7 +738,7 @@ export default function App() {
         // Immediately move the call out of INBOUND state locally to hide the box instantly
         if (inboundCall) {
           setActiveCallSid(inboundCall.callSid);
-          setCalls(prev => prev.map(c => c.callSid === inboundCall.callSid ? { ...c, status: 'ACTIVE' } : c));
+          setCalls(prev => prev.map(c => c.callSid === inboundCall.callSid ? { ...c, status: 'BRIDGING' } : c));
         }
 
         // Accept WebRTC audio if pending
@@ -892,8 +918,8 @@ export default function App() {
       <div className="topbar">
         <div className="topbar-logo">CERTXA <span> {mode}</span> TERMINAL v2.0</div>
         <div className="topbar-center">
-          <div className={`call-pill ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED'].includes(callState) ? 'ringing' : ''}`}>
-            <div className={`dot ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED'].includes(callState) ? 'ringing' : ''}`}></div>
+          <div className={`call-pill ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}>
+            <div className={`dot ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}></div>
             {sc.label}
           </div>
         </div>
@@ -910,19 +936,26 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3 px-3 border-x border-[#333]">
             <div className={`h-1.5 w-1.5 rounded-full ${
-              linkStatus === 'OK' ? 'bg-green-500' : 
+              linkStatus === 'OK' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 
               linkStatus === 'ERROR' ? 'bg-red-500' : 
               linkStatus === 'CONNECTING' ? 'bg-yellow-500 animate-pulse' : 
-              'bg-gray-500'
+              'bg-gray-400'
             }`} />
-            <span className={`text-[9px] font-bold ${
-              linkStatus === 'OK' ? 'text-green-500' : 
-              linkStatus === 'ERROR' ? 'text-red-500' : 
-              linkStatus === 'CONNECTING' ? 'text-yellow-500' : 
-              'text-gray-500'
-            }`}>
-              LINK: {linkStatus}
-            </span>
+            <button 
+              onClick={() => {
+                showNotify('RE-INITIALIZING COMM-LINK...', 'info');
+                console.log('[VOIP] Manual Refresh Requested');
+                window.location.reload(); 
+              }}
+              className={`text-[9px] font-bold hover:underline ${
+                linkStatus === 'OK' ? 'text-green-500' : 
+                linkStatus === 'ERROR' ? 'text-red-500' : 
+                linkStatus === 'CONNECTING' ? 'text-yellow-500' : 
+                'text-gray-400'
+              }`}
+            >
+              LINK: {linkMsg}
+            </button>
           </div>
           <span className="agent-tag" onClick={logout} style={{ cursor: 'pointer' }} title="Click to Logout">{user ? `${mode}: ${AGENT_ID}` : 'UNAUTHORIZED'}</span>
           {new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })} ICT
