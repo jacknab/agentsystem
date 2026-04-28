@@ -692,7 +692,7 @@ export default function App() {
     if (input.startsWith("D")) {
       const number = input.substring(1).replace(/\D/g, "");
       if (number.length === 10) {
-        showNotify(`INITIATING OUTBOUND: +1${number}`, "info");
+        showNotify(`INITIATING: +1${number}`, "info");
         setLinkStatus('BRIDGING');
         fetch("/api/call/dial", {
           method: "POST",
@@ -703,16 +703,23 @@ export default function App() {
             setMenuMode("PHONE");
             setLinkStatus('ACTIVE');
           } else {
-            const data = await res.json();
+            let errorMsg = "Server error";
+            try {
+              const data = await res.json();
+              errorMsg = data.error || errorMsg;
+            } catch (e) {
+              console.error("Failed to parse dial error response", e);
+            }
             setLinkStatus('OK');
-            showNotify(`OUTBOUND FAILED: ${data.error || 'Server error'}`, "err");
+            showNotify(`DIAL FAILED: ${errorMsg}`, "err");
+            console.error("[OUTBOUND] Dial failed:", errorMsg);
           }
         }).catch(err => {
           setLinkStatus('OK');
-          showNotify("NETWORK ERROR", "err");
+          showNotify("NETWORK ERROR: Check server logs", "err");
         });
       } else {
-        showNotify("DIAL ERROR: USE 10 DIGITS", "warn");
+        showNotify("DIAL ERROR: Use 10 digits", "warn");
       }
       setCmd("");
       return;
@@ -923,7 +930,7 @@ export default function App() {
       </AnimatePresence>
 
       <div className="topbar">
-        <div className="topbar-logo">CERTXA <span> {mode}</span> TERMINAL v2.0</div>
+        <div className="topbar-logo">CERTXA <span> {mode}</span> TERMINAL v2.1</div>
         <div className="topbar-center">
           <div className={`call-pill ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}>
             <div className={`dot ${['ACTIVE', 'TRANSFER', 'HOLD', 'BRIEFING'].includes(callState) ? 'active' : ['INBOUND', 'LOOKUP', 'QUEUED', 'BRIDGING'].includes(callState) ? 'ringing' : ''}`}></div>

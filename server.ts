@@ -29,19 +29,24 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Twilio Client - Lazy init or handled safely
-let twilioClient: any;
-try {
-  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
-    twilioClient = twilio(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_AUTH_TOKEN
-    );
-  } else {
-    console.warn("[TWILIO] Missing credentials. Twilio features will be disabled.");
+// Twilio Client - Lazy initialization to handle runtime env updates
+let _twilioClient: any;
+function getTwilioClient() {
+  const accountSid = (process.env.TWILIO_ACCOUNT_SID || "").trim();
+  const authToken = (process.env.TWILIO_AUTH_TOKEN || "").trim();
+
+  if (!accountSid || !authToken) {
+    throw new Error("TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN is missing in .env");
   }
-} catch (err) {
-  console.error("[TWILIO] Initialization error:", err);
+
+  // If already initialized with correct SID, reuse
+  if (_twilioClient && _twilioClient.accountSid === accountSid) {
+    return _twilioClient;
+  }
+
+  console.log(`[TWILIO] Initializing client for account ...${accountSid.slice(-5)}`);
+  _twilioClient = twilio(accountSid, authToken);
+  return _twilioClient;
 }
 
 const db = new Database();
@@ -153,12 +158,13 @@ app.post("/api/call/dial", async (req, res) => {
   const customerCallSid = `out_${Date.now()}`; 
 
   console.log(`[OUTBOUND] Agent ${agentId} is dialing ${formattedNumber}`);
+  console.log(`[OUTBOUND] ENV Check - SID: ${!!process.env.TWILIO_ACCOUNT_SID}, Token: ${!!process.env.TWILIO_AUTH_TOKEN}`);
 
   try {
-    if (!twilioClient) {
-      console.error("[OUTBOUND] Twilio client not initialized. Check SID/Auth Token.");
-      return res.status(500).json({ error: "Twilio credentials missing on server" });
-    }
+    const accountSid = (process.env.TWILIO_ACCOUNT_SID || "").trim();
+    console.log(`[OUTBOUND] Using AccountSID from ENV: ${accountSid.substring(0, 5)}... (len: ${accountSid.length})`);
+    
+    const twilioClient = getTwilioClient();
 
     const fromNumber = process.env.TWILIO_PHONE_NUMBER;
     if (!fromNumber) {
@@ -180,20 +186,29 @@ app.post("/api/call/dial", async (req, res) => {
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
       const protocol = req.headers['x-forwarded-proto'] || 'https';
-      // Use x-forwarded-host for Cloud Run environments if available
       const host = req.headers['x-forwarded-host'] || req.headers['host'] || "";
       const hostStr = Array.isArray(host) ? host[0] : host;
       
       if (hostStr && hostStr.includes("-dev-")) {
-        // Force -pre- for callbacks as -dev- might be behind auth/different routing
         baseUrl = `${protocol}://${hostStr.replace("-dev-", "-pre-")}`;
       } else if (hostStr) {
         baseUrl = `${protocol}://${hostStr}`;
+      } else if (process.env.APP_URL) {
+        baseUrl = process.env.APP_URL;
       }
+    }
+
+    if (!baseUrl) {
+      console.error("[OUTBOUND] Could not determine Base URL for callback.");
+      return res.status(500).json({ error: "Server configuration error: Base URL unknown" });
     }
 
     console.log(`[OUTBOUND] Agent ${agentId} dialing ${formattedNumber} via ${fromNumber}`);
     console.log(`[OUTBOUND] TwiML Base URL: ${baseUrl}`);
+    
+    // Debug: Check if client is using expected Credentials (safely)
+    const activeSid = twilioClient.accountSid;
+    console.log(`[OUTBOUND] Twilio Client using AccountSid: ${activeSid ? activeSid.substring(0, 5) + '...' : 'MISSING'}`);
 
     // 3. Dial the Customer first, then move them to conference
     const customerCall = await twilioClient.calls.create({
@@ -201,8 +216,15 @@ app.post("/api/call/dial", async (req, res) => {
       from: fromNumber,
       url: `${baseUrl}/twilio/outbound-join?confName=conf_${customerCallSid}`
     }).catch((err: any) => {
-        console.error('[TWILIO] Customer Dial Error:', err.message);
-        throw new Error(`Twilio rejected customer dial: ${err.message}`);
+        const msg = err.message || "Unknown error";
+        console.error('[TWILIO] Customer Dial Error:', msg);
+        if (err.status === 401 || msg.includes("Authenticate")) {
+          throw new Error("Twilio Authentication Failed: Check your Account SID and Auth Token.");
+        }
+        if (err.status === 404 || msg.includes("not found")) {
+          throw new Error(`Twilio Error: Phone number ${fromNumber} not found or invalid.`);
+        }
+        throw new Error(`Twilio rejected customer dial: ${msg}`);
     });
 
     // Map both the real SID and the placeholder for tracking
@@ -217,8 +239,12 @@ app.post("/api/call/dial", async (req, res) => {
       from: fromNumber,
       url: `${baseUrl}/twilio/agent-join?confName=conf_${customerCallSid}`
     }).catch((err: any) => {
-        console.error('[TWILIO] Agent Dial Error:', err.message);
-        throw new Error(`Twilio rejected agent dial: ${err.message}`);
+        const msg = err.message || "Unknown error";
+        console.error('[TWILIO] Agent Dial Error:', msg);
+        if (err.status === 401 || msg.includes("Authenticate")) {
+          throw new Error("Twilio Authentication Failed: Check your Account SID and Auth Token.");
+        }
+        throw new Error(`Twilio rejected agent dial: ${msg}`);
     });
 
     res.json({ success: true, callSid: customerCall.sid });
@@ -231,6 +257,7 @@ app.post("/api/call/dial", async (req, res) => {
 // Endpoint for customer side of outbound call
 app.post("/twilio/outbound-join", (req, res) => {
   const { confName } = req.query;
+  console.log(`[TWILIO] Customer joining outbound conference: ${confName}`);
   
   // Determine the status callback URL
   let baseUrl = process.env.APP_URL || "";
@@ -244,10 +271,17 @@ app.post("/twilio/outbound-join", (req, res) => {
       baseUrl = `${protocol}://${hostStr}`;
     }
   }
-  const statusCallback = `${baseUrl}/twilio/status`;
-
+  
   const twiml = new twilio.twiml.VoiceResponse();
+  
+  if (!confName) {
+    twiml.say("Error: Conference name missing.");
+    res.type('text/xml');
+    return res.send(twiml.toString());
+  }
+
   const dial = twiml.dial();
+  const statusCallback = baseUrl ? `${baseUrl}/twilio/status` : undefined;
   dial.conference({
     startConferenceOnEnter: true,
     endConferenceOnExit: true,
@@ -264,7 +298,7 @@ app.post("/twilio/monitor", async (req, res) => {
   if (!call) return res.status(404).json({ error: "Call not found" });
 
   try {
-    if (!twilioClient) throw new Error("Twilio client not initialized");
+    const twilioClient = getTwilioClient();
     
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
@@ -293,7 +327,7 @@ app.post("/twilio/barge", async (req, res) => {
   if (!call) return res.status(404).json({ error: "Call not found" });
 
   try {
-    if (!twilioClient) throw new Error("Twilio client not initialized");
+    const twilioClient = getTwilioClient();
     
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
@@ -663,7 +697,7 @@ app.post("/api/call/bridge", async (req, res) => {
   if (!call) return res.status(404).json({ error: "Call not found" });
 
   try {
-    if (!twilioClient) throw new Error("Twilio client not initialized");
+    const twilioClient = getTwilioClient();
     console.log(`[BRIDGE] Connecting agent ${agentId} to conference conf_${callSid}`);
 
     // Update assignment in state
@@ -742,7 +776,7 @@ app.post("/twilio/hold", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
-      if (!twilioClient) throw new Error("Twilio client not initialized");
+      const twilioClient = getTwilioClient();
       // Mute the customer and play music (or just mute in conference)
       // For real hold, we might move them to a different conference or use 'hold' attribute if supported
       await twilioClient.conferences(call.conferenceSid)
@@ -770,7 +804,7 @@ app.post("/twilio/resume", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
-      if (!twilioClient) throw new Error("Twilio client not initialized");
+      const twilioClient = getTwilioClient();
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
         .update({ hold: false });
@@ -797,7 +831,7 @@ app.post("/twilio/transfer/initiate", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
-      if (!twilioClient) throw new Error("Twilio client not initialized");
+      const twilioClient = getTwilioClient();
       // 1. Put customer on HOLD
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
@@ -824,7 +858,7 @@ app.post("/twilio/transfer/complete", async (req, res) => {
 
   if (call && call.conferenceSid) {
     try {
-      if (!twilioClient) throw new Error("Twilio client not initialized");
+      const twilioClient = getTwilioClient();
       // 3. Reconnect customer to Agent B
       await twilioClient.conferences(call.conferenceSid)
         .participants(callSid)
