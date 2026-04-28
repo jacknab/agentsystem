@@ -190,13 +190,16 @@ app.get("/api/auth/token", (req, res) => {
     const appSid = process.env.TWILIO_TWIML_APP_SID?.trim();
 
     // Diagnostic check: Account SID should start with AC, API Keys with SK
-    if (!accountSid.startsWith('AC')) console.warn(`[AUTH] Warning: Account SID "${accountSid.substring(0,4)}..." may be incorrect (Expected starting with 'AC')`);
-    if (!apiKey.startsWith('SK')) console.warn(`[AUTH] Warning: API Key "${apiKey.substring(0,4)}..." may be incorrect (Expected starting with 'SK')`);
+    if (!accountSid.startsWith('AC')) console.warn(`[AUTH] CRITICAL: Account SID "${accountSid.substring(0,4)}..." does not start with AC. This will cause 31202 errors.`);
+    if (!apiKey.startsWith('SK')) console.warn(`[AUTH] Warning: Voice API Key "${apiKey.substring(0,4)}..." does not start with SK. If you are trying to use your Auth Token, please create an API Key in the Twilio Console instead.`);
 
     const token = new AccessToken(accountSid, apiKey, apiSecret, {
       identity: identity,
       ttl: 3600
     });
+
+    // Explicitly set identity again as some SDK versions are picky
+    token.identity = identity;
 
     const voiceGrant = new VoiceGrant({
       incomingAllow: true,
@@ -206,7 +209,7 @@ app.get("/api/auth/token", (req, res) => {
     token.addGrant(voiceGrant);
     const jwt = token.toJwt();
     
-    console.log(`[AUTH] Token for ${identity} generated successfully.`);
+    console.log(`[AUTH] Identity: ${identity} | AppSid: ${appSid} | Token Generated via API Key: ${apiKey.substring(0,6)}...`);
     res.json({ token: jwt });
   } catch (err) {
     console.error("[AUTH] Token generation failed:", err);
@@ -257,7 +260,7 @@ async function assignCallToAgent(callSid: string, agentId: string) {
   
   io.emit("call.assigned", call);
 
-  // Rollover logic: 30s to answer
+  // Rollover logic: 25s to answer
   setTimeout(() => {
     const currentCall = activeCalls.get(callSid);
     if (currentCall && currentCall.assignedAgent === agentId && currentCall.status === 'INBOUND') {
@@ -279,7 +282,7 @@ async function assignCallToAgent(callSid: string, agentId: string) {
         processNextInQueue(nextAgent.id);
       }
     }
-  }, 30000);
+  }, 25000);
 }
 
 async function processNextInQueue(agentId: string) {
@@ -362,9 +365,17 @@ app.post("/twilio/inbound", (req, res) => {
       });
       dial.client(availableAgent.id);
       
-      // Fallback if client dial fails (e.g. offline)
-      twiml.say("The agent is currently establishing a connection. Please hold.");
-      twiml.redirect(`${baseUrl}/twilio/inbound`);
+      // Fallback if client dial fails (e.g. offline, timeout, or registration error)
+      // Instead of looping, we move them to the conference (queue) pool
+      twiml.say("The agent is unavailable. Moving your call to the priority queue.");
+      
+      const confDial = twiml.dial();
+      confDial.conference({
+        waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
+        statusCallbackEvent: ["start", "end", "join", "leave", "mute", "hold"],
+        statusCallback: statusCallback,
+        startConferenceOnEnter: true,
+      }, `conf_${CallSid}`);
     } else {
       twiml.say("All agents are currently busy. Please stay on the line.");
       io.emit("call.queued", state);

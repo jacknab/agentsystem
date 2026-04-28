@@ -239,6 +239,7 @@ export default function App() {
           if (error.code === 31000) userMsg = 'VOIP ERROR: Identity taken or connection failed';
           if (error.code === 31005) userMsg = 'VOIP ERROR: Connection to Twilio timed out';
           if (error.code === 31201) userMsg = 'VOIP ERROR: Invalid token credentials';
+          if (error.code === 31202) userMsg = 'CRITICAL: JWT Signature Validation Failed. Verify Twilio API Secret.';
           if (error.code === 31208) userMsg = 'VOIP ERROR: Token expired';
           if (error.code === 53000) userMsg = 'VOIP ERROR: Signaling connection failed. Check if an Adblocker or Firewall is blocking Twilio WebSocket connections.';
           
