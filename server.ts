@@ -184,15 +184,25 @@ app.get("/api/auth/token", (req, res) => {
     const VoiceGrant = AccessToken.VoiceGrant;
 
     // Use strict trimming to prevent hidden whitespace/newlines from breaking signatures
-    const accountSid = process.env.TWILIO_ACCOUNT_SID.trim();
-    const apiKey = process.env.TWILIO_VOICE_API_KEY.trim();
-    const apiSecret = process.env.TWILIO_VOICE_API_SECRET.trim();
-    const appSid = process.env.TWILIO_TWIML_APP_SID?.trim();
+    const accountSid = (process.env.TWILIO_ACCOUNT_SID || '').trim();
+    const apiKey = (process.env.TWILIO_VOICE_API_KEY || '').trim();
+    const apiSecret = (process.env.TWILIO_VOICE_API_SECRET || '').trim();
+    const appSid = (process.env.TWILIO_TWIML_APP_SID || '').trim();
 
-    // Diagnostic check: Account SID should start with AC, API Keys with SK
-    if (!accountSid.startsWith('AC')) console.error(`[AUTH] CRITICAL: TWILIO_ACCOUNT_SID "${accountSid.substring(0,4)}..." is invalid. Must start with AC.`);
-    if (!apiKey.startsWith('SK')) console.error(`[AUTH] CRITICAL: TWILIO_VOICE_API_KEY "${apiKey.substring(0,4)}..." is invalid. Must start with SK. Do NOT use your Auth Token (starts with hex) here.`);
-    if (apiSecret.length < 10) console.error(`[AUTH] CRITICAL: TWILIO_VOICE_API_SECRET seems too short. Verify you copied the full secret from the Twilio Console.`);
+    if (!accountSid || !apiKey || !apiSecret) {
+      console.error("[AUTH] Missing Credentials: SID:", !!accountSid, "Key:", !!apiKey, "Secret:", !!apiSecret);
+      return res.status(500).json({ error: "Twilio credentials missing or incomplete" });
+    }
+
+    // Diagnostic check
+    if (!accountSid.startsWith('AC')) console.error(`[AUTH] CRITICAL: TWILIO_ACCOUNT_SID is invalid (Must start with AC).`);
+    if (!apiKey.startsWith('SK')) console.error(`[AUTH] CRITICAL: TWILIO_VOICE_API_KEY is invalid (Must start with SK).`);
+    
+    // Safely log fragments to help user verify without exposing full secret
+    console.log(`[AUTH] Verifying Credentials:`);
+    console.log(` - AccountSid: ${accountSid.substring(0, 5)}...${accountSid.slice(-3)} (Len: ${accountSid.length})`);
+    console.log(` - ApiKey SID: ${apiKey.substring(0, 5)}...${apiKey.slice(-3)} (Len: ${apiKey.length})`);
+    console.log(` - ApiSecret:  ${apiSecret.substring(0, 3)}...${apiSecret.slice(-3)} (Len: ${apiSecret.length})`);
 
     const token = new AccessToken(accountSid, apiKey, apiSecret, {
       identity: identity,
@@ -445,6 +455,27 @@ app.post("/api/call/assign", async (req, res) => {
     res.json({ success: true });
   } else {
     res.status(404).json({ error: "Call not found" });
+  }
+});
+
+app.post("/api/call/bridge", async (req, res) => {
+  const { callSid, agentId } = req.body;
+  const call = activeCalls.get(callSid);
+
+  if (!call) return res.status(404).json({ error: "Call not found" });
+
+  try {
+    if (!twilioClient) throw new Error("Twilio client not initialized");
+    console.log(`[BRIDGE] Updating call ${callSid} to dial agent ${agentId}`);
+    
+    // Update the caller to dial the agent - this bridges them directly
+    await twilioClient.calls(callSid).update({
+      twiml: `<Response><Dial><Client>${agentId}</Client></Dial></Response>`
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[BRIDGE] Failed:", err);
+    res.status(500).json({ error: "Bridge failed" });
   }
 });
 

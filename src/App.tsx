@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 import { motion, AnimatePresence } from "motion/react";
 import { Device, Call } from "@twilio/voice-sdk";
+import ModernDashboard from "./components/ModernDashboard";
 
 // --- Types ---
 interface User {
@@ -144,7 +145,7 @@ export default function App() {
 
   const [socket, setSocket] = useState<Socket | null>(null);
   const [calls, setCalls] = useState<CallState[]>([]);
-  const [mode, setMode] = useState<'AGENT' | 'ADMIN' | 'MONITOR'>('AGENT');
+  const [mode, setMode] = useState<'AGENT' | 'ADMIN' | 'MANAGER' | 'MONITOR'>('AGENT');
   const [agents, setAgents] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [dbScripts, setDbScripts] = useState<Record<string, { read: string; guide: string }>>({});
@@ -156,6 +157,8 @@ export default function App() {
   const [cmd, setCmd] = useState('');
   const [menuMode, setMenuMode] = useState<'MAIN' | 'PHONE'>('MAIN');
   const [isAccepting, setIsAccepting] = useState(false);
+  const isAcceptingRef = useRef(false);
+  useEffect(() => { isAcceptingRef.current = isAccepting; }, [isAccepting]);
   const [agentStatus, setAgentStatus] = useState<'available' | 'busy' | 'dnd'>('busy');
   const [isRingingTimedOut, setIsRingingTimedOut] = useState(false);
 
@@ -257,6 +260,13 @@ export default function App() {
           showNotify('INCOMING VOIP CONNECTION', 'warn');
           setTwilioCall(call);
           
+          // Auto-accept if we were mid-bridge or if we initiated the answer manually
+          if (isAcceptingRef.current) {
+            console.log('[VOIP] Auto-accepting incoming call from PBX bridge');
+            call.accept();
+            setIsAccepting(false);
+          }
+
           call.on('disconnect', () => {
             setTwilioCall(null);
             showNotify('VOIP CALL DISCONNECTED', 'info');
@@ -306,7 +316,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (mode === 'ADMIN') fetchAdminData();
+    if (mode !== 'AGENT') fetchAdminData();
   }, [mode, fetchAdminData]);
   const [notify, setNotify] = useState<{ id: number; msg: string; type: string } | null>(null);
 
@@ -352,11 +362,36 @@ export default function App() {
       answer: () => {
         const myInbound = calls.find(c => (c.status === "INBOUND" || c.status === "QUEUED") && (c.assignedAgent === AGENT_ID || !c.assignedAgent));
         if (myInbound) {
+          if (!device || device.state !== 'registered') {
+            showNotify('ERROR: COMM-LINK OFFLINE (Check Keys)', 'error');
+            setIsAccepting(false);
+            return;
+          }
+          
+          showNotify('SIGNALING BRIDGE...', 'info');
+          
+          // 1. Assign in DB
           fetch("/api/call/assign", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ callSid: myInbound.callSid, agentId: AGENT_ID })
           });
+
+          // Always request bridge for queued/inbound to ensure Twilio redirects the caller to the agent
+          console.log('[VOIP] Requesting PBX Bridge for:', myInbound.callSid);
+          fetch("/api/call/bridge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ callSid: myInbound.callSid, agentId: AGENT_ID })
+          }).catch(err => {
+            console.error('[VOIP] Bridge request failed:', err);
+            setIsAccepting(false);
+          });
+          
+          // Note: The actual audio accept happens in the 'incoming' event handler 
+          // because the bridge will cause Twilio to dial the browser.
+        } else {
+          setIsAccepting(false);
         }
       },
       wrap: () => {
@@ -501,6 +536,12 @@ export default function App() {
     if (input === "ADMIN") {
       setMode('ADMIN');
       showNotify('ADMIN OVERRIDE: Agent Management Active', 'warn');
+      setCmd('');
+      return;
+    }
+    if (input === "MANAGER") {
+      setMode('MANAGER');
+      showNotify('MANAGER VIEW: System Performance Dashboard', 'ok');
       setCmd('');
       return;
     }
@@ -791,6 +832,22 @@ export default function App() {
     setTwilioCall(null);
   };
 
+  if (mode !== 'AGENT') {
+    return (
+      <ModernDashboard 
+        user={user}
+        mode={mode as 'ADMIN' | 'MANAGER' | 'MONITOR'}
+        setMode={setMode}
+        logout={logout}
+        calls={calls}
+        agents={agents}
+        logs={logs}
+        fetchAdminData={fetchAdminData}
+        showNotify={showNotify}
+      />
+    );
+  }
+
   return (
     <div className="terminal font-mono">
       <AnimatePresence>
@@ -823,6 +880,12 @@ export default function App() {
             <span className="text-[10px] text-gray-500">STATUS:</span>
             <span className={`text-[10px] font-bold ${agentStatus === 'available' ? 'text-green-500' : 'text-red-500'}`}>
               {(user ? agentStatus : 'LOCKED').toUpperCase()}
+            </span>
+          </div>
+          <div className="flex items-center gap-3 px-3 border-x border-[#333]">
+            <div className={`h-1.5 w-1.5 rounded-full ${device?.state === 'registered' ? 'bg-green-500' : 'bg-red-500'}`} />
+            <span className={`text-[9px] font-bold ${device?.state === 'registered' ? 'text-green-500' : 'text-red-500'}`}>
+              LINK: {device?.state === 'registered' ? 'OK' : 'OFFLINE'}
             </span>
           </div>
           <span className="agent-tag" onClick={logout} style={{ cursor: 'pointer' }} title="Click to Logout">{user ? `${mode}: ${AGENT_ID}` : 'UNAUTHORIZED'}</span>
@@ -1250,6 +1313,7 @@ export default function App() {
           <button onClick={() => execCmd('00')} className="wh-btn wh-billing">PHONE MENU</button>
           <button onClick={() => execCmd('AGENT')} className="wh-btn wh-tech">TO AGENT</button>
           <button onClick={() => execCmd('ADMIN')} className="wh-btn wh-wrap">TO ADMIN</button>
+          <button onClick={() => execCmd('MANAGER')} className="wh-btn wh-tech">TO MANAGER</button>
           <button onClick={() => execCmd('MONITOR')} className="wh-btn wh-reset">TO MONITOR</button>
           <div className="wh-label">
             PBX SIMULATOR CONTROL V1.3 · {mode} MODE

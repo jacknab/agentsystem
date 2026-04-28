@@ -92,6 +92,14 @@ export class Database {
     } else if (!agent.login_code) {
       this.db.prepare("UPDATE users SET login_code = ? WHERE id = ?").run("1234567", "agent-001");
     }
+
+    const manager = this.db.prepare("SELECT * FROM users WHERE id = ?").get("manager-001");
+    if (!manager) {
+      this.db.prepare("INSERT INTO users (id, name, email, role, status, pin, login_code) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run("manager-001", "Manager Mike", "mike@certxa.com", "manager", "available", "8888", "8888888");
+    } else if (!manager.login_code) {
+      this.db.prepare("UPDATE users SET login_code = ? WHERE id = ?").run("8888888", "manager-001");
+    }
   }
 
   createCall(callSid: string, status: string, customerName: string) {

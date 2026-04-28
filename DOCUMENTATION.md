@@ -75,6 +75,13 @@ The CERTXA Terminal is a high-performance, command-driven VoIP interface designe
 ---
 
 ## 6. Technical Troubleshooting
-*   **Sig-Loss (Error 53000)**: Usually caused by local firewalls or adblockers. Ensure `ashburn` and `roaming` edges are reachable.
-*   **Signal Timeouts**: Inbound pops expire after 20 seconds. If missed, the agent is automatically set to DND to prevent continuous routing to an empty terminal.
-*   **Reset**: Type `RESET` or `CLEAR` to perform a hard wipe of the terminal state if audio or data gets out of sync.
+*   **CRITICAL: Error 31202 (JWT Signature Failure)**:
+    *   This is the most common cause of "Answering but only hearing music."
+    *   **The Fix**: You must use a **Twilio API Secret**, *not* your main Auth Token.
+    *   Go to **Twilio Console > Account > API Keys**. Create a "Standard" key.
+    *   Set `TWILIO_VOICE_API_KEY` to the SID (starts with `SK...`).
+    *   Set `TWILIO_VOICE_API_SECRET` to the Secret (the long string shown only once).
+*   **Answer Box appears but doesn't connect**: 
+    *   When you press `A`, the terminal tries to pull the call to you. If your COMM-LINK status is not "ESTABLISHED", the call will stay in the queue (hearing music) because Twilio cannot find your browser.
+*   **Check COMM-LINK**: Ensure the log shows `COMM-LINK ESTABLISHED` on startup.
+*   **Manual Reset**: Type `READY` again to re-sync your status if you stop receiving calls.
