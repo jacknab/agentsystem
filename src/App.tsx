@@ -163,6 +163,7 @@ export default function App() {
   const [isRingingTimedOut, setIsRingingTimedOut] = useState(false);
 
   const [device, setDevice] = useState<Device | null>(null);
+  const [linkStatus, setLinkStatus] = useState<'OFFLINE' | 'OK' | 'ERROR'>('OFFLINE');
   const [twilioCall, setTwilioCall] = useState<Call | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -210,14 +211,17 @@ export default function App() {
         newDevice.on('registered', () => {
           showNotify('COMM-LINK ESTABLISHED', 'ok');
           console.log('[VOIP] Device registered successfully');
+          setLinkStatus('OK');
         });
 
         newDevice.on('registering', () => {
           console.log('[VOIP] Registering device...');
+          setLinkStatus('OFFLINE');
         });
 
         newDevice.on('unregistered', () => {
           showNotify('COMM-LINK LOST', 'warn');
+          setLinkStatus('OFFLINE');
           // Try to get a fresh token and re-register
           setTimeout(async () => {
             if (activeDevice && activeDevice.state === 'unregistered') {
@@ -236,6 +240,7 @@ export default function App() {
 
         newDevice.on('error', (error) => {
           console.error('Twilio Device Error:', error);
+          setLinkStatus('ERROR');
           let userMsg = `VOIP ERROR (${error.code}): ${error.message}`;
           
           // Map common Twilio error codes to helpful messages
@@ -883,9 +888,9 @@ export default function App() {
             </span>
           </div>
           <div className="flex items-center gap-3 px-3 border-x border-[#333]">
-            <div className={`h-1.5 w-1.5 rounded-full ${device?.state === 'registered' ? 'bg-green-500' : 'bg-red-500'}`} />
-            <span className={`text-[9px] font-bold ${device?.state === 'registered' ? 'text-green-500' : 'text-red-500'}`}>
-              LINK: {device?.state === 'registered' ? 'OK' : 'OFFLINE'}
+            <div className={`h-1.5 w-1.5 rounded-full ${linkStatus === 'OK' ? 'bg-green-500' : linkStatus === 'ERROR' ? 'bg-red-500' : 'bg-yellow-500'}`} />
+            <span className={`text-[9px] font-bold ${linkStatus === 'OK' ? 'text-green-500' : linkStatus === 'ERROR' ? 'text-red-500' : 'text-yellow-500'}`}>
+              LINK: {linkStatus}
             </span>
           </div>
           <span className="agent-tag" onClick={logout} style={{ cursor: 'pointer' }} title="Click to Logout">{user ? `${mode}: ${AGENT_ID}` : 'UNAUTHORIZED'}</span>

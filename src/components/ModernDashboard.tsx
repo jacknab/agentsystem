@@ -120,6 +120,20 @@ export default function ModernDashboard({
     }
   };
 
+  const bargeCall = async (sid: string) => {
+    try {
+      await fetch("/twilio/barge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callSid: sid, agentId: user.id })
+      });
+      showNotify(`Barging into call ${sid}`, 'ok');
+      setMode('AGENT'); // Switch to terminal to hear/barge
+    } catch (err) {
+      showNotify("Barge failed", "err");
+    }
+  };
+
   return (
     <div className="flex h-screen bg-[#f8fafc] text-slate-800 font-sans relative">
       <AnimatePresence>
@@ -498,7 +512,10 @@ export default function ModernDashboard({
                           <Play size={14} />
                           Silent Listen
                         </button>
-                        <button className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-100 transition-all">
+                        <button 
+                          onClick={() => bargeCall(call.callSid)}
+                          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-100 transition-all"
+                        >
                           <Users size={14} />
                           Barge-In
                         </button>

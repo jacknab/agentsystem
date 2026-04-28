@@ -103,15 +103,59 @@ app.post("/api/admin/scripts", (req, res) => {
   res.json({ success: true });
 });
 
-// --- Silent Join (QA Monitor) ---
+// --- Silent Join (QA Monitor) & Barge ---
 app.post("/twilio/monitor", async (req, res) => {
   const { callSid, managerId } = req.body;
   const call = activeCalls.get(callSid);
-  if (!call || !call.conferenceSid) return res.status(404).json({ error: "Active conference not found" });
+  if (!call) return res.status(404).json({ error: "Call not found" });
 
   try {
-    io.emit("call.monitor_joined", { callSid, managerId });
+    if (!twilioClient) throw new Error("Twilio client not initialized");
+    
+    let baseUrl = process.env.APP_URL || "";
+    if (!baseUrl || baseUrl.includes("-dev-")) {
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      const host = req.headers['host'] || "";
+      baseUrl = `${protocol}://${host}`.includes("-dev-") ? `${protocol}://${host}`.replace("-dev-", "-pre-") : `${protocol}://${host}`;
+    }
+
+    // Dial the manager/monitor and join them muted
+    await twilioClient.calls.create({
+      to: `client:${managerId}`,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaMonitor',
+      url: `${baseUrl}/twilio/agent-join?confName=conf_${callSid}&muted=true`
+    });
+
     db.logAgentAction(managerId, "MONITOR_JOIN", callSid);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+app.post("/twilio/barge", async (req, res) => {
+  const { callSid, agentId } = req.body;
+  const call = activeCalls.get(callSid);
+  if (!call) return res.status(404).json({ error: "Call not found" });
+
+  try {
+    if (!twilioClient) throw new Error("Twilio client not initialized");
+    
+    let baseUrl = process.env.APP_URL || "";
+    if (!baseUrl || baseUrl.includes("-dev-")) {
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      const host = req.headers['host'] || "";
+      baseUrl = `${protocol}://${host}`.includes("-dev-") ? `${protocol}://${host}`.replace("-dev-", "-pre-") : `${protocol}://${host}`;
+    }
+
+    // Dial the agent/manager and join them UNMUTED (Barge)
+    await twilioClient.calls.create({
+      to: `client:${agentId}`,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaBarge',
+      url: `${baseUrl}/twilio/agent-join?confName=conf_${callSid}&muted=false`
+    });
+
+    db.logAgentAction(agentId, "BARGE_JOIN", callSid);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -338,24 +382,24 @@ app.post("/twilio/inbound", (req, res) => {
       return res.status(400).send("Missing CallSid");
     }
 
-    const availableAgent = db.getAvailableAgent();
-    const initialStatus = availableAgent ? "INBOUND" : "QUEUED";
-
+    // Always start in QUEUED state for a shared queue
+    const initialStatus = "QUEUED";
     db.createCall(CallSid, initialStatus, From || "Unknown");
 
     const state: CallState = {
       callSid: CallSid,
       status: initialStatus,
-      assignedAgent: availableAgent ? availableAgent.id : null,
+      assignedAgent: null,
       customerName: From || "Unknown",
       queueName: "Main Queue",
+      conferenceSid: undefined
     };
     activeCalls.set(CallSid, state);
 
     // Determine the status callback URL
     let baseUrl = process.env.APP_URL || "";
     if (!baseUrl || baseUrl.includes("-dev-")) {
-      const protocol = req.headers['x-forwarded-proto'] || 'http';
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
       const host = req.headers['host'] || "";
       let detectedUrl = `${protocol}://${host}`;
       if (detectedUrl.includes("-dev-")) {
@@ -366,41 +410,21 @@ app.post("/twilio/inbound", (req, res) => {
     }
     const statusCallback = `${baseUrl}/twilio/status`;
 
-    if (availableAgent) {
-      console.log(`[TWILIO] Routing call ${CallSid} to available agent ${availableAgent.id}`);
-      assignCallToAgent(CallSid, availableAgent.id);
-      
-      const dial = twiml.dial({
-        timeout: 20,
-        callerId: From,
-      });
-      dial.client(availableAgent.id);
-      
-      // Fallback if client dial fails (e.g. offline, timeout, or registration error)
-      // Instead of looping, we move them to the conference (queue) pool
-      twiml.say("The agent is unavailable. Moving your call to the priority queue.");
-      
-      const confDial = twiml.dial();
-      confDial.conference({
-        waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
-        statusCallbackEvent: ["start", "end", "join", "leave", "mute", "hold"],
-        statusCallback: statusCallback,
-        startConferenceOnEnter: true,
-      }, `conf_${CallSid}`);
-    } else {
-      twiml.say("All agents are currently busy. Please stay on the line.");
-      io.emit("call.queued", state);
-      
-      const dial = twiml.dial();
-      dial.conference({
-        waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
-        statusCallbackEvent: ["start", "end", "join", "leave", "mute", "hold"],
-        statusCallback: statusCallback,
-        startConferenceOnEnter: true,
-      }, `conf_${CallSid}`);
-    }
+    // Shared Queue Pattern:
+    // Callers enter a conference with startConferenceOnEnter=false.
+    // They will hear hold music until an agent joins with startConferenceOnEnter=true.
+    const dial = twiml.dial();
+    dial.conference({
+      waitUrl: process.env.HOLD_MUSIC_URL || "http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical",
+      statusCallbackEvent: ["start", "end", "join", "leave"],
+      statusCallback: statusCallback,
+      startConferenceOnEnter: false, // Wait for agent
+      endConferenceOnExit: true,
+    }, `conf_${CallSid}`);
 
-    console.log(`[TWILIO] TwiML generated for SID=${CallSid}`);
+    io.emit("call.queued", state);
+
+    console.log(`[TWILIO] TwiML generated for SID=${CallSid} (Shared Queue)`);
     res.type("text/xml");
     res.send(twiml.toString());
   } catch (err) {
@@ -466,17 +490,51 @@ app.post("/api/call/bridge", async (req, res) => {
 
   try {
     if (!twilioClient) throw new Error("Twilio client not initialized");
-    console.log(`[BRIDGE] Updating call ${callSid} to dial agent ${agentId}`);
-    
-    // Update the caller to dial the agent - this bridges them directly
-    await twilioClient.calls(callSid).update({
-      twiml: `<Response><Dial><Client>${agentId}</Client></Dial></Response>`
+    console.log(`[BRIDGE] Connecting agent ${agentId} to conference conf_${callSid}`);
+
+    // Update assignment in state
+    call.assignedAgent = agentId;
+    call.status = "ACTIVE";
+    db.assignAgent(callSid, agentId);
+    db.updateCallStatus(callSid, "ACTIVE");
+    db.updateUserStatus(agentId, 'busy');
+
+    // Create an outbound call to the Agent's browser/client
+    // When the agent answers, they join the conference and the caller's music stops.
+    let baseUrl = process.env.APP_URL || "";
+    if (!baseUrl || baseUrl.includes("-dev-")) {
+      const protocol = req.headers['x-forwarded-proto'] || 'https';
+      const host = req.headers['host'] || "";
+      baseUrl = `${protocol}://${host}`.includes("-dev-") ? `${protocol}://${host}`.replace("-dev-", "-pre-") : `${protocol}://${host}`;
+    }
+
+    await twilioClient.calls.create({
+      to: `client:${agentId}`,
+      from: process.env.TWILIO_PHONE_NUMBER || 'CertxaPBX',
+      url: `${baseUrl}/twilio/agent-join?confName=conf_${callSid}`
     });
+
+    io.emit("call.assigned", call);
     res.json({ success: true });
   } catch (err) {
     console.error("[BRIDGE] Failed:", err);
     res.status(500).json({ error: "Bridge failed" });
   }
+});
+
+// Endpoint to provide TwiML for the Agent joining a conference
+app.post("/twilio/agent-join", (req, res) => {
+  const { confName, muted } = req.query;
+  const twiml = new twilio.twiml.VoiceResponse();
+  const dial = twiml.dial();
+  dial.conference({
+    startConferenceOnEnter: true, // Agent joins and starts music/talking
+    endConferenceOnExit: true,
+    muted: muted === 'true'
+  }, confName as string);
+
+  res.type("text/xml");
+  res.send(twiml.toString());
 });
 
 app.post("/twilio/hold", async (req, res) => {
